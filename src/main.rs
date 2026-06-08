@@ -34,10 +34,11 @@ struct ShaderParams {
 struct Camera {
     x: f32,
     y: f32,
-    angle: f32,
     height: f32,
-    horizon_offset: f32,
-    projection_scale: f32,
+    yaw: f32,
+    pitch: f32,
+    vertical_fov: f32,
+    max_distance: f32,
 }
 
 struct TerrainMaps {
@@ -62,20 +63,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     let gpu = Device::new(ShaderFormat::SPIRV, cfg!(debug_assertions))?.with_window(&window)?;
     let pipeline = create_pipeline(&gpu, &window)?;
     let terrain_maps = load_terrain_maps(&gpu)?;
+    let mouse = sdl.mouse();
+    mouse.set_relative_mouse_mode(&window, true);
+    mouse.show_cursor(false);
 
     let mut camera = Camera {
         x: 250.0,
         y: 330.0,
-        angle: 0.4,
         height: 150.0,
-        horizon_offset: 0.0,
-        projection_scale: 910.0,
+        yaw: 0.4,
+        pitch: -0.08,
+        vertical_fov: 1.05,
+        max_distance: 900.0,
     };
 
     let mut events = sdl.event_pump()?;
     let mut previous_frame = Instant::now();
 
     'running: loop {
+        let mut mouse_delta = [0.0, 0.0];
         for event in events.poll_iter() {
             match event {
                 Event::Quit { .. }
@@ -83,6 +89,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
+                Event::MouseMotion { xrel, yrel, .. } => {
+                    mouse_delta[0] += xrel;
+                    mouse_delta[1] += yrel;
+                }
                 _ => {}
             }
         }
@@ -90,7 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let now = Instant::now();
         let dt = (now - previous_frame).min(Duration::from_millis(50));
         previous_frame = now;
-        update_camera(&events, &mut camera, dt.as_secs_f32());
+        update_camera(&events, &mut camera, dt.as_secs_f32(), mouse_delta);
 
         let mut command_buffer = gpu.acquire_command_buffer()?;
         if let Ok(swapchain) = command_buffer.wait_and_acquire_swapchain_texture(&window) {
@@ -264,21 +274,32 @@ fn create_texture_from_rgba8(
     Ok(texture)
 }
 
-fn update_camera(events: &sdl3::EventPump, camera: &mut Camera, dt: f32) {
+fn update_camera(events: &sdl3::EventPump, camera: &mut Camera, dt: f32, mouse_delta: [f32; 2]) {
     let keyboard = events.keyboard_state();
     let turn_speed = 1.85;
+    let pitch_speed = 1.35;
+    let mouse_sensitivity = 0.0024;
     let move_speed = 135.0;
     let height_speed = 80.0;
 
+    camera.yaw += mouse_delta[0] * mouse_sensitivity;
+    camera.pitch -= mouse_delta[1] * mouse_sensitivity;
+
     if keyboard.is_scancode_pressed(Scancode::Q) || keyboard.is_scancode_pressed(Scancode::Left) {
-        camera.angle -= turn_speed * dt;
+        camera.yaw -= turn_speed * dt;
     }
     if keyboard.is_scancode_pressed(Scancode::E) || keyboard.is_scancode_pressed(Scancode::Right) {
-        camera.angle += turn_speed * dt;
+        camera.yaw += turn_speed * dt;
+    }
+    if keyboard.is_scancode_pressed(Scancode::Up) {
+        camera.pitch += pitch_speed * dt;
+    }
+    if keyboard.is_scancode_pressed(Scancode::Down) {
+        camera.pitch -= pitch_speed * dt;
     }
 
-    let forward = [camera.angle.sin(), -camera.angle.cos()];
-    let right = [camera.angle.cos(), camera.angle.sin()];
+    let forward = [camera.yaw.sin(), -camera.yaw.cos()];
+    let right = [camera.yaw.cos(), camera.yaw.sin()];
     let mut movement = [0.0, 0.0];
 
     if keyboard.is_scancode_pressed(Scancode::W) {
@@ -310,16 +331,11 @@ fn update_camera(events: &sdl3::EventPump, camera: &mut Camera, dt: f32) {
     if keyboard.is_scancode_pressed(Scancode::F) {
         camera.height -= height_speed * dt;
     }
-    if keyboard.is_scancode_pressed(Scancode::Up) {
-        camera.horizon_offset -= 110.0 * dt;
-    }
-    if keyboard.is_scancode_pressed(Scancode::Down) {
-        camera.horizon_offset += 110.0 * dt;
-    }
 
-    camera.height = camera.height.clamp(20.0, 420.0);
-    camera.projection_scale = camera.projection_scale.clamp(320.0, 1800.0);
-    camera.horizon_offset = camera.horizon_offset.clamp(-220.0, 220.0);
+    camera.height = camera.height.clamp(20.0, 520.0);
+    camera.pitch = camera.pitch.clamp(-1.45, 1.45);
+    camera.vertical_fov = camera.vertical_fov.clamp(0.5, 1.4);
+    camera.max_distance = camera.max_distance.clamp(120.0, 1400.0);
 }
 
 fn shader_params(
@@ -329,14 +345,14 @@ fn shader_params(
     height: u32,
 ) -> ShaderParams {
     ShaderParams {
-        camera: [camera.x, camera.y, camera.angle, camera.height],
-        render: [width as f32, height as f32, camera.projection_scale, 255.0],
+        camera: [camera.x, camera.y, camera.height, camera.yaw],
+        render: [width as f32, height as f32, camera.vertical_fov, 255.0],
         maps: [
             terrain_maps.color_size[0],
             terrain_maps.color_size[1],
             terrain_maps.height_size[0],
             terrain_maps.height_size[1],
         ],
-        tuning: [0.43, camera.horizon_offset, 0.72, 850.0],
+        tuning: [camera.pitch, 1.0, camera.max_distance, 0.0],
     }
 }
