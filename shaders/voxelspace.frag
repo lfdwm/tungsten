@@ -13,8 +13,21 @@ layout(set = 3, binding = 0) uniform Params {
 layout(location = 0) in vec2 frag_uv;
 layout(location = 0) out vec4 out_color;
 
+float height_sample(vec2 uv) {
+    return textureLod(height_map, uv, 0.0).r * render.w;
+}
+
 float height_at(vec2 world_pos) {
-    return textureLod(height_map, world_pos / maps.zw, 0.0).r * render.w;
+    vec2 uv = world_pos / maps.zw;
+    vec2 texel = 1.0 / maps.zw;
+    float h = height_sample(uv);
+
+    h = max(h, height_sample(uv + vec2(texel.x, 0.0)));
+    h = max(h, height_sample(uv - vec2(texel.x, 0.0)));
+    h = max(h, height_sample(uv + vec2(0.0, texel.y)));
+    h = max(h, height_sample(uv - vec2(0.0, texel.y)));
+
+    return h;
 }
 
 vec3 color_at(vec2 world_pos) {
@@ -62,7 +75,7 @@ void main() {
         return;
     }
 
-    for (int i = 0; i < 210; i++) {
+    for (int i = 0; i < 260; i++) {
         float dist = prev_dist + step_size;
         if (dist > tuning.w) {
             break;
@@ -93,7 +106,7 @@ void main() {
         }
 
         prev_dist = dist;
-        step_size += 0.035;
+        step_size += 0.02;
     }
 
     out_color = vec4(color, 1.0);
