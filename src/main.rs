@@ -1,5 +1,6 @@
 use std::{
     error::Error,
+    fs,
     time::{Duration, Instant},
 };
 
@@ -19,8 +20,10 @@ use sdl3::{
 
 const WINDOW_WIDTH: u32 = 1280;
 const WINDOW_HEIGHT: u32 = 720;
-const COLOR_MAP_PATH: &str = "assets/untracked/C11W.png";
-const HEIGHT_MAP_PATH: &str = "assets/untracked/D11.png";
+const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 2049_diffuse.png";
+const HEIGHT_MAP_PATH: &str = "assets/untracked/continent Height Output 2049.r16";
+const HEIGHT_MAP_WIDTH: u32 = 2049;
+const HEIGHT_MAP_HEIGHT: u32 = 2049;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -185,14 +188,18 @@ fn load_terrain_maps(gpu: &Device) -> Result<TerrainMaps, Box<dyn Error>> {
     let copy_pass = gpu.begin_copy_pass(&copy_commands)?;
 
     let color_image = image::open(COLOR_MAP_PATH)?;
-    let height_image = image::open(HEIGHT_MAP_PATH)?;
     let color_size = [color_image.width() as f32, color_image.height() as f32];
-    let height_size = [height_image.width() as f32, height_image.height() as f32];
+    let height_size = [HEIGHT_MAP_WIDTH as f32, HEIGHT_MAP_HEIGHT as f32];
 
     let color =
         create_texture_from_rgba8(gpu, &copy_pass, color_image, TextureFormat::R8g8b8a8Unorm)?;
-    let height =
-        create_texture_from_rgba8(gpu, &copy_pass, height_image, TextureFormat::R8g8b8a8Unorm)?;
+    let height = create_texture_from_r16(
+        gpu,
+        &copy_pass,
+        HEIGHT_MAP_PATH,
+        HEIGHT_MAP_WIDTH,
+        HEIGHT_MAP_HEIGHT,
+    )?;
     let color_sampler = gpu.create_sampler(
         SamplerCreateInfo::new()
             .with_min_filter(Filter::Nearest)
@@ -233,6 +240,45 @@ fn create_texture_from_rgba8(
 ) -> Result<Texture<'static>, Box<dyn Error>> {
     let (width, height) = image.dimensions();
     let pixels = image.to_rgba8();
+
+    create_texture_from_bytes(gpu, copy_pass, width, height, format, pixels.as_raw())
+}
+
+fn create_texture_from_r16(
+    gpu: &Device,
+    copy_pass: &sdl3::gpu::CopyPass,
+    path: &str,
+    width: u32,
+    height: u32,
+) -> Result<Texture<'static>, Box<dyn Error>> {
+    let pixels = fs::read(path)?;
+    let expected_size = width as usize * height as usize * 2;
+    if pixels.len() != expected_size {
+        return Err(format!(
+            "{path} has {} bytes, expected {expected_size} for a {width}x{height} R16 heightmap",
+            pixels.len()
+        )
+        .into());
+    }
+
+    create_texture_from_bytes(
+        gpu,
+        copy_pass,
+        width,
+        height,
+        TextureFormat::R16Unorm,
+        &pixels,
+    )
+}
+
+fn create_texture_from_bytes(
+    gpu: &Device,
+    copy_pass: &sdl3::gpu::CopyPass,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    pixels: &[u8],
+) -> Result<Texture<'static>, Box<dyn Error>> {
     let size_bytes = pixels.len() as u32;
 
     let texture = gpu.create_texture(
@@ -253,7 +299,7 @@ fn create_texture_from_rgba8(
         .build()?;
 
     let mut map = transfer_buffer.map::<u8>(gpu, false);
-    map.mem_mut().copy_from_slice(pixels.as_raw());
+    map.mem_mut().copy_from_slice(pixels);
     map.unmap();
 
     copy_pass.upload_to_gpu_texture(

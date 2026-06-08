@@ -28,7 +28,7 @@ float height_at(vec2 world_pos) {
 }
 
 vec3 color_at(vec2 world_pos) {
-    return textureLod(color_map, world_pos / maps.zw, 0.0).rgb;
+    return textureLod(color_map, world_pos / maps.xy, 0.0).rgb;
 }
 
 vec3 sky_color(float ray_y) {
