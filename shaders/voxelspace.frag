@@ -13,21 +13,18 @@ layout(set = 3, binding = 0) uniform Params {
 layout(location = 0) in vec2 frag_uv;
 layout(location = 0) out vec4 out_color;
 
-float height_sample(vec2 uv) {
-    return textureLod(height_map, uv, 0.0).r * render.w;
+ivec2 wrap_height_cell(ivec2 cell) {
+    ivec2 map_size = ivec2(int(maps.z), int(maps.w));
+    ivec2 wrapped = cell % map_size;
+    return (wrapped + map_size) % map_size;
+}
+
+float height_cell(ivec2 cell) {
+    return texelFetch(height_map, wrap_height_cell(cell), 0).r * render.w;
 }
 
 float height_at(vec2 world_pos) {
-    vec2 uv = world_pos / maps.zw;
-    vec2 texel = 1.0 / maps.zw;
-    float h = height_sample(uv);
-
-    h = max(h, height_sample(uv + vec2(texel.x, 0.0)));
-    h = max(h, height_sample(uv - vec2(texel.x, 0.0)));
-    h = max(h, height_sample(uv + vec2(0.0, texel.y)));
-    h = max(h, height_sample(uv - vec2(0.0, texel.y)));
-
-    return h;
+    return height_cell(ivec2(floor(world_pos)));
 }
 
 vec3 color_at(vec2 world_pos) {
@@ -66,7 +63,7 @@ void main() {
     vec3 color = sky;
     float prev_dist = 2.0;
     float prev_projected_y = terrain_projected_y(ray, prev_dist, ray_depth, horizon);
-    float step_size = 1.0;
+    float step_size = 0.8;
 
     if (pixel.y >= prev_projected_y) {
         vec3 terrain_color = color_at(camera.xy + ray * prev_dist);
@@ -87,7 +84,7 @@ void main() {
             float low = prev_dist;
             float high = dist;
 
-            for (int j = 0; j < 5; j++) {
+            for (int j = 0; j < 4; j++) {
                 float mid = (low + high) * 0.5;
                 float mid_projected_y = terrain_projected_y(ray, mid, ray_depth, horizon);
 
@@ -106,7 +103,7 @@ void main() {
         }
 
         prev_dist = dist;
-        step_size += 0.02;
+        step_size += 0.025;
     }
 
     out_color = vec4(color, 1.0);

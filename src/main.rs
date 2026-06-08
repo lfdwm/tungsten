@@ -194,8 +194,8 @@ fn load_terrain_maps(gpu: &Device) -> Result<TerrainMaps, Box<dyn Error>> {
     )?;
     let height_sampler = gpu.create_sampler(
         SamplerCreateInfo::new()
-            .with_min_filter(Filter::Linear)
-            .with_mag_filter(Filter::Linear)
+            .with_min_filter(Filter::Nearest)
+            .with_mag_filter(Filter::Nearest)
             .with_mipmap_mode(SamplerMipmapMode::Nearest)
             .with_address_mode_u(SamplerAddressMode::Repeat)
             .with_address_mode_v(SamplerAddressMode::Repeat)
