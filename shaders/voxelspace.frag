@@ -24,16 +24,7 @@ float height_cell(ivec2 cell) {
 }
 
 float height_at(vec2 world_pos) {
-    vec2 base = floor(world_pos);
-    vec2 local = fract(world_pos);
-    ivec2 cell = ivec2(base);
-
-    float h00 = height_cell(cell);
-    float h10 = height_cell(cell + ivec2(1, 0));
-    float h01 = height_cell(cell + ivec2(0, 1));
-    float h11 = height_cell(cell + ivec2(1, 1));
-
-    return mix(mix(h00, h10, local.x), mix(h01, h11, local.x), local.y);
+    return height_cell(ivec2(floor(world_pos)));
 }
 
 vec3 color_at(vec2 world_pos) {
