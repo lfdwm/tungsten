@@ -115,49 +115,85 @@ vec3 terrain_color(vec3 hit_pos) {
     return base * (0.48 + diffuse * 0.44 + sky_fill * 0.12);
 }
 
-bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dist) {
-    float t = max(raymarch.y, 0.05);
-    float max_dist = raymarch.z;
-    float previous_t = t;
+float raymarch_step_size(float horizontal_dist) {
+    float lod_blend = smoothstep(lod_distances.x, lod_distances.y, horizontal_dist);
+    float near_step = 0.55 + horizontal_dist * 0.0055;
+    float far_step = 1.0 + horizontal_dist * 0.0095;
+    return clamp(mix(near_step, far_step, lod_blend), 0.45, 24.0);
+}
 
-    if (terrain_delta(origin + ray * previous_t) <= 0.0) {
+bool refine_terrain_hit(vec3 origin, vec3 ray, float low, float high, out vec3 hit_pos, out float hit_dist) {
+    for (int j = 0; j < 8; j++) {
+        float mid = (low + high) * 0.5;
+        float mid_delta = terrain_delta(origin + ray * mid);
+
+        if (mid_delta <= 0.0) {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+
+    hit_dist = high;
+    hit_pos = origin + ray * hit_dist;
+    return true;
+}
+
+bool probe_large_step(vec3 origin, vec3 ray, float low, float high, out vec3 hit_pos, out float hit_dist) {
+    float first_t = mix(low, high, 0.333333);
+    float first_delta = terrain_delta(origin + ray * first_t);
+
+    if (first_delta <= 0.0) {
+        return refine_terrain_hit(origin, ray, low, first_t, hit_pos, hit_dist);
+    }
+
+    float second_t = mix(low, high, 0.666667);
+    float second_delta = terrain_delta(origin + ray * second_t);
+
+    if (second_delta <= 0.0) {
+        return refine_terrain_hit(origin, ray, first_t, second_t, hit_pos, hit_dist);
+    }
+
+    return false;
+}
+
+bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dist) {
+    float previous_t = max(raymarch.y, 0.05);
+    float ray_horizontal = max(length(ray.xz), 0.001);
+    float max_t = raymarch.z / ray_horizontal;
+    float previous_delta = terrain_delta(origin + ray * previous_t);
+    float previous_horizontal = previous_t * ray_horizontal;
+
+    if (previous_delta <= 0.0) {
         hit_dist = previous_t;
         hit_pos = origin + ray * hit_dist;
         return true;
     }
 
     for (int i = 0; i < 360; i++) {
-        float step_size = max(0.35, 0.55 + t * 0.0055);
-        t += step_size;
+        float step_size = raymarch_step_size(previous_horizontal);
+        float t = previous_t + step_size / ray_horizontal;
 
-        if (t > max_dist) {
+        if (t > max_t) {
             break;
+        }
+
+        if (step_size > 10.0 && previous_delta < render.w * 0.55) {
+            if (probe_large_step(origin, ray, previous_t, t, hit_pos, hit_dist)) {
+                return true;
+            }
         }
 
         vec3 point = origin + ray * t;
         float delta = terrain_delta(point);
 
         if (delta <= 0.0) {
-            float low = previous_t;
-            float high = t;
-
-            for (int j = 0; j < 8; j++) {
-                float mid = (low + high) * 0.5;
-                float mid_delta = terrain_delta(origin + ray * mid);
-
-                if (mid_delta <= 0.0) {
-                    high = mid;
-                } else {
-                    low = mid;
-                }
-            }
-
-            hit_dist = high;
-            hit_pos = origin + ray * hit_dist;
-            return true;
+            return refine_terrain_hit(origin, ray, previous_t, t, hit_pos, hit_dist);
         }
 
         previous_t = t;
+        previous_delta = delta;
+        previous_horizontal = t * ray_horizontal;
     }
 
     return false;
@@ -173,7 +209,8 @@ void main() {
     float hit_dist;
 
     if (raymarch_terrain(origin, ray, hit_pos, hit_dist)) {
-        float fog = smoothstep(raymarch.z * 0.34, raymarch.z, hit_dist);
+        float hit_horizontal_dist = distance(hit_pos.xz, camera.xy);
+        float fog = smoothstep(raymarch.z * 0.62, raymarch.z, hit_horizontal_dist);
         vec3 color = mix(terrain_color(hit_pos), sky, fog * 0.86);
         out_color = vec4(color, 1.0);
     } else {

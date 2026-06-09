@@ -90,7 +90,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         yaw: 0.4,
         pitch: -0.08,
         vertical_fov: 1.05,
-        max_distance: 900.0,
+        max_distance: 3000.0,
     };
 
     let mut events = sdl.event_pump()?;
@@ -412,7 +412,7 @@ fn update_camera(events: &sdl3::EventPump, camera: &mut Camera, dt: f32, mouse_d
     camera.height = camera.height.clamp(20.0, 520.0);
     camera.pitch = camera.pitch.clamp(-1.45, 1.45);
     camera.vertical_fov = camera.vertical_fov.clamp(0.5, 1.4);
-    camera.max_distance = camera.max_distance.clamp(120.0, 1400.0);
+    camera.max_distance = camera.max_distance.clamp(120.0, 4096.0);
 }
 
 fn shader_params(
