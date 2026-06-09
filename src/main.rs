@@ -20,10 +20,10 @@ use sdl3::{
 
 const WINDOW_WIDTH: u32 = 1280;
 const WINDOW_HEIGHT: u32 = 720;
-const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 2049_diffuse.png";
-const HEIGHT_MAP_PATH: &str = "assets/untracked/continent Height Output 2049.r16";
-const HEIGHT_MAP_WIDTH: u32 = 2049;
-const HEIGHT_MAP_HEIGHT: u32 = 2049;
+const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 4096_diffuse.png";
+const HEIGHT_MAP_PATH: &str = "assets/untracked/continent Height Output 4096.r16";
+const HEIGHT_MAP_WIDTH: u32 = 4096;
+const HEIGHT_MAP_HEIGHT: u32 = 4096;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
