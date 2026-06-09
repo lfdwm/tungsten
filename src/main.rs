@@ -1,4 +1,5 @@
 use std::{
+    env,
     error::Error,
     fs,
     time::{Duration, Instant},
@@ -8,7 +9,7 @@ use image::GenericImageView;
 use sdl3::{
     event::Event,
     gpu::{
-        ColorTargetDescription, ColorTargetInfo, Device, FillMode, Filter,
+        ColorTargetDescription, ColorTargetInfo, Device, FillMode, Filter, GraphicsPipeline,
         GraphicsPipelineTargetInfo, LoadOp, PrimitiveType, Sampler, SamplerAddressMode,
         SamplerCreateInfo, SamplerMipmapMode, ShaderFormat, ShaderStage, StoreOp, Texture,
         TextureCreateInfo, TextureFormat, TextureRegion, TextureSamplerBinding,
@@ -32,6 +33,7 @@ const HEIGHT_SCALE: f32 = 255.0 * 1.7;
 const RAYMARCH_START_DISTANCE: f32 = 1.0;
 const HEIGHT_LOD_BLEND_START: f32 = 125.0;
 const HEIGHT_LOD_BLEND_END: f32 = 300.0;
+const PERFORMANCE_RENDER_SCALE: f32 = 0.5;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -42,6 +44,9 @@ struct ShaderParams {
     height_maps: [f32; 4],
     lod_distances: [f32; 4],
     raymarch: [f32; 4],
+    ray_forward: [f32; 4],
+    ray_right: [f32; 4],
+    ray_up: [f32; 4],
 }
 
 struct Camera {
@@ -66,19 +71,67 @@ struct TerrainMaps {
     height_far_size: [f32; 2],
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenderProfile {
+    Quality,
+    Performance,
+}
+
+impl RenderProfile {
+    fn from_env() -> Self {
+        match env::var("TUNGSTEN_PROFILE") {
+            Ok(profile) if profile.eq_ignore_ascii_case("quality") => Self::Quality,
+            _ => Self::Performance,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Quality => "quality",
+            Self::Performance => "performance",
+        }
+    }
+
+    fn uses_offscreen_target(self) -> bool {
+        self == Self::Performance
+    }
+
+    fn render_size(self, window_width: u32, window_height: u32) -> [u32; 2] {
+        match self {
+            Self::Quality => [window_width.max(1), window_height.max(1)],
+            Self::Performance => [
+                scaled_render_dimension(window_width),
+                scaled_render_dimension(window_height),
+            ],
+        }
+    }
+}
+
+struct ProfileRenderTarget {
+    texture: Texture<'static>,
+    width: u32,
+    height: u32,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
+    let render_profile = RenderProfile::from_env();
+    let window_title = format!("tungsten - SDL_GPU VoxelSpace ({})", render_profile.name());
 
     let window = video
-        .window("tungsten - SDL_GPU VoxelSpace", WINDOW_WIDTH, WINDOW_HEIGHT)
+        .window(&window_title, WINDOW_WIDTH, WINDOW_HEIGHT)
         .position_centered()
         .resizable()
         .build()?;
 
     let gpu = Device::new(ShaderFormat::SPIRV, cfg!(debug_assertions))?.with_window(&window)?;
-    let pipeline = create_pipeline(&gpu, &window)?;
+    let target_format = gpu.get_swapchain_texture_format(&window);
+    let terrain_pipeline = create_terrain_pipeline(&gpu, target_format)?;
+    let upscale_pipeline = create_upscale_pipeline(&gpu, target_format)?;
     let terrain_maps = load_terrain_maps(&gpu)?;
+    let upscale_sampler = create_upscale_sampler(&gpu)?;
+    let mut profile_render_target = None;
     let mouse = sdl.mouse();
     mouse.set_relative_mouse_mode(&window, true);
     mouse.show_cursor(false);
@@ -118,18 +171,33 @@ fn main() -> Result<(), Box<dyn Error>> {
         previous_frame = now;
         update_camera(&events, &mut camera, dt.as_secs_f32(), mouse_delta);
 
+        let (window_width, window_height) = window.size();
+        ensure_profile_render_target(
+            &gpu,
+            &mut profile_render_target,
+            render_profile,
+            target_format,
+            window_width,
+            window_height,
+        )?;
+
         let mut command_buffer = gpu.acquire_command_buffer()?;
-        if let Ok(swapchain) = command_buffer.wait_and_acquire_swapchain_texture(&window) {
-            let (width, height) = window.size();
-            let params = shader_params(&camera, &terrain_maps, width, height);
+        if let Some(render_target) = profile_render_target.as_ref() {
+            let params = shader_params(
+                &camera,
+                &terrain_maps,
+                render_target.width,
+                render_target.height,
+            );
+
             let color_targets = [ColorTargetInfo::default()
-                .with_texture(&swapchain)
+                .with_texture(&render_target.texture)
                 .with_load_op(LoadOp::CLEAR)
                 .with_store_op(StoreOp::STORE)
                 .with_clear_color(Color::RGB(105, 136, 157))];
 
             let render_pass = gpu.begin_render_pass(&command_buffer, &color_targets, None)?;
-            render_pass.bind_graphics_pipeline(&pipeline);
+            render_pass.bind_graphics_pipeline(&terrain_pipeline);
             render_pass.bind_fragment_samplers(
                 0,
                 &[
@@ -147,6 +215,62 @@ fn main() -> Result<(), Box<dyn Error>> {
             command_buffer.push_fragment_uniform_data(0, &params);
             render_pass.draw_primitives(3, 1, 0, 0);
             gpu.end_render_pass(render_pass);
+
+            if let Ok(swapchain) = command_buffer.wait_and_acquire_swapchain_texture(&window) {
+                let color_targets = [ColorTargetInfo::default()
+                    .with_texture(&swapchain)
+                    .with_load_op(LoadOp::CLEAR)
+                    .with_store_op(StoreOp::STORE)
+                    .with_clear_color(Color::RGB(105, 136, 157))];
+
+                let upscale_pass = gpu.begin_render_pass(&command_buffer, &color_targets, None)?;
+                upscale_pass.bind_graphics_pipeline(&upscale_pipeline);
+                upscale_pass.bind_fragment_samplers(
+                    0,
+                    &[TextureSamplerBinding::new()
+                        .with_texture(&render_target.texture)
+                        .with_sampler(&upscale_sampler)],
+                );
+                upscale_pass.draw_primitives(3, 1, 0, 0);
+                gpu.end_render_pass(upscale_pass);
+                command_buffer.submit()?;
+            } else {
+                command_buffer.cancel();
+            }
+        } else if let Ok(swapchain) = command_buffer.wait_and_acquire_swapchain_texture(&window) {
+            let params = shader_params(
+                &camera,
+                &terrain_maps,
+                swapchain.width(),
+                swapchain.height(),
+            );
+
+            let color_targets = [ColorTargetInfo::default()
+                .with_texture(&swapchain)
+                .with_load_op(LoadOp::CLEAR)
+                .with_store_op(StoreOp::STORE)
+                .with_clear_color(Color::RGB(105, 136, 157))];
+
+            let render_pass = gpu.begin_render_pass(&command_buffer, &color_targets, None)?;
+            render_pass.bind_graphics_pipeline(&terrain_pipeline);
+            render_pass.bind_fragment_samplers(
+                0,
+                &[
+                    TextureSamplerBinding::new()
+                        .with_texture(&terrain_maps.color)
+                        .with_sampler(&terrain_maps.color_sampler),
+                    TextureSamplerBinding::new()
+                        .with_texture(&terrain_maps.height_near)
+                        .with_sampler(&terrain_maps.height_sampler),
+                    TextureSamplerBinding::new()
+                        .with_texture(&terrain_maps.height_far)
+                        .with_sampler(&terrain_maps.height_sampler),
+                ],
+            );
+            command_buffer.push_fragment_uniform_data(0, &params);
+            render_pass.draw_primitives(3, 1, 0, 0);
+            gpu.end_render_pass(render_pass);
+
             command_buffer.submit()?;
         } else {
             command_buffer.cancel();
@@ -156,10 +280,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn create_pipeline(
+fn create_terrain_pipeline(
     gpu: &Device,
-    window: &sdl3::video::Window,
-) -> Result<sdl3::gpu::GraphicsPipeline, Box<dyn Error>> {
+    target_format: TextureFormat,
+) -> Result<GraphicsPipeline, Box<dyn Error>> {
     let vertex_shader = gpu
         .create_shader()
         .with_code(
@@ -182,7 +306,6 @@ fn create_pipeline(
         .with_entrypoint(c"main")
         .build()?;
 
-    let swapchain_format = gpu.get_swapchain_texture_format(window);
     let pipeline = gpu
         .create_graphics_pipeline()
         .with_fragment_shader(&fragment_shader)
@@ -191,12 +314,117 @@ fn create_pipeline(
         .with_fill_mode(FillMode::Fill)
         .with_target_info(
             GraphicsPipelineTargetInfo::new().with_color_target_descriptions(&[
-                ColorTargetDescription::new().with_format(swapchain_format),
+                ColorTargetDescription::new().with_format(target_format),
             ]),
         )
         .build()?;
 
     Ok(pipeline)
+}
+
+fn create_upscale_pipeline(
+    gpu: &Device,
+    target_format: TextureFormat,
+) -> Result<GraphicsPipeline, Box<dyn Error>> {
+    let vertex_shader = gpu
+        .create_shader()
+        .with_code(
+            ShaderFormat::SPIRV,
+            include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen.vert.spv")),
+            ShaderStage::Vertex,
+        )
+        .with_entrypoint(c"main")
+        .build()?;
+
+    let fragment_shader = gpu
+        .create_shader()
+        .with_code(
+            ShaderFormat::SPIRV,
+            include_bytes!(concat!(env!("OUT_DIR"), "/upscale.frag.spv")),
+            ShaderStage::Fragment,
+        )
+        .with_samplers(1)
+        .with_entrypoint(c"main")
+        .build()?;
+
+    let pipeline = gpu
+        .create_graphics_pipeline()
+        .with_fragment_shader(&fragment_shader)
+        .with_vertex_shader(&vertex_shader)
+        .with_primitive_type(PrimitiveType::TriangleList)
+        .with_fill_mode(FillMode::Fill)
+        .with_target_info(
+            GraphicsPipelineTargetInfo::new().with_color_target_descriptions(&[
+                ColorTargetDescription::new().with_format(target_format),
+            ]),
+        )
+        .build()?;
+
+    Ok(pipeline)
+}
+
+fn scaled_render_dimension(window_dimension: u32) -> u32 {
+    ((window_dimension as f32 * PERFORMANCE_RENDER_SCALE).round() as u32).max(1)
+}
+
+fn ensure_profile_render_target(
+    gpu: &Device,
+    render_target: &mut Option<ProfileRenderTarget>,
+    profile: RenderProfile,
+    format: TextureFormat,
+    window_width: u32,
+    window_height: u32,
+) -> Result<(), Box<dyn Error>> {
+    if !profile.uses_offscreen_target() {
+        *render_target = None;
+        return Ok(());
+    }
+
+    let [width, height] = profile.render_size(window_width, window_height);
+    let needs_recreate = match render_target {
+        Some(target) => target.width != width || target.height != height,
+        None => true,
+    };
+
+    if needs_recreate {
+        *render_target = Some(ProfileRenderTarget {
+            texture: create_color_target_texture(gpu, width, height, format)?,
+            width,
+            height,
+        });
+    }
+
+    Ok(())
+}
+
+fn create_color_target_texture(
+    gpu: &Device,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+) -> Result<Texture<'static>, Box<dyn Error>> {
+    Ok(gpu.create_texture(
+        TextureCreateInfo::new()
+            .with_format(format)
+            .with_type(TextureType::_2D)
+            .with_width(width)
+            .with_height(height)
+            .with_layer_count_or_depth(1)
+            .with_num_levels(1)
+            .with_usage(TextureUsage::COLOR_TARGET | TextureUsage::SAMPLER),
+    )?)
+}
+
+fn create_upscale_sampler(gpu: &Device) -> Result<Sampler, Box<dyn Error>> {
+    Ok(gpu.create_sampler(
+        SamplerCreateInfo::new()
+            .with_min_filter(Filter::Nearest)
+            .with_mag_filter(Filter::Nearest)
+            .with_mipmap_mode(SamplerMipmapMode::Nearest)
+            .with_address_mode_u(SamplerAddressMode::ClampToEdge)
+            .with_address_mode_v(SamplerAddressMode::ClampToEdge)
+            .with_address_mode_w(SamplerAddressMode::ClampToEdge),
+    )?)
 }
 
 fn load_terrain_maps(gpu: &Device) -> Result<TerrainMaps, Box<dyn Error>> {
@@ -421,8 +649,10 @@ fn shader_params(
     width: u32,
     height: u32,
 ) -> ShaderParams {
+    let ray_basis = camera_ray_basis(camera, width, height);
+
     ShaderParams {
-        camera: [camera.x, camera.y, camera.height, camera.yaw],
+        camera: [camera.x, camera.y, camera.height, 0.0],
         render: [
             width as f32,
             height as f32,
@@ -448,5 +678,72 @@ fn shader_params(
             camera.max_distance,
             0.0,
         ],
+        ray_forward: [
+            ray_basis.forward[0],
+            ray_basis.forward[1],
+            ray_basis.forward[2],
+            0.0,
+        ],
+        ray_right: [
+            ray_basis.right_scaled[0],
+            ray_basis.right_scaled[1],
+            ray_basis.right_scaled[2],
+            0.0,
+        ],
+        ray_up: [
+            ray_basis.up_scaled[0],
+            ray_basis.up_scaled[1],
+            ray_basis.up_scaled[2],
+            0.0,
+        ],
+    }
+}
+
+struct RayBasis {
+    forward: [f32; 3],
+    right_scaled: [f32; 3],
+    up_scaled: [f32; 3],
+}
+
+fn camera_ray_basis(camera: &Camera, width: u32, height: u32) -> RayBasis {
+    let sin_yaw = camera.yaw.sin();
+    let cos_yaw = camera.yaw.cos();
+    let sin_pitch = camera.pitch.sin();
+    let cos_pitch = camera.pitch.cos();
+    let forward_flat = [sin_yaw, 0.0, -cos_yaw];
+    let right = [cos_yaw, 0.0, sin_yaw];
+    let world_up = [0.0, 1.0, 0.0];
+    let forward = normalize3(add3(
+        scale3(forward_flat, cos_pitch),
+        scale3(world_up, sin_pitch),
+    ));
+    let up = normalize3(add3(
+        scale3(world_up, cos_pitch),
+        scale3(forward_flat, -sin_pitch),
+    ));
+    let aspect = width as f32 / (height as f32).max(1.0);
+    let tan_half_fov = (camera.vertical_fov * 0.5).tan();
+
+    RayBasis {
+        forward,
+        right_scaled: scale3(right, aspect * tan_half_fov),
+        up_scaled: scale3(up, tan_half_fov),
+    }
+}
+
+fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn scale3(v: [f32; 3], scale: f32) -> [f32; 3] {
+    [v[0] * scale, v[1] * scale, v[2] * scale]
+}
+
+fn normalize3(v: [f32; 3]) -> [f32; 3] {
+    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if length > 0.0 {
+        [v[0] / length, v[1] / length, v[2] / length]
+    } else {
+        v
     }
 }

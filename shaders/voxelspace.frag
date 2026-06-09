@@ -11,6 +11,9 @@ layout(set = 3, binding = 0) uniform Params {
     vec4 height_maps;
     vec4 lod_distances;
     vec4 raymarch;
+    vec4 ray_forward;
+    vec4 ray_right;
+    vec4 ray_up;
 };
 
 layout(location = 0) in vec2 frag_uv;
@@ -66,28 +69,9 @@ vec3 camera_origin() {
 }
 
 vec3 ray_direction(vec2 screen_uv) {
-    float yaw = camera.w;
-    float pitch = raymarch.x;
-    float sin_yaw = sin(yaw);
-    float cos_yaw = cos(yaw);
-    float sin_pitch = sin(pitch);
-    float cos_pitch = cos(pitch);
-
-    vec3 forward_flat = vec3(sin_yaw, 0.0, -cos_yaw);
-    vec3 right = vec3(cos_yaw, 0.0, sin_yaw);
-    vec3 world_up = vec3(0.0, 1.0, 0.0);
-    vec3 forward = normalize(forward_flat * cos_pitch + world_up * sin_pitch);
-    vec3 up = normalize(world_up * cos_pitch - forward_flat * sin_pitch);
-
-    float aspect = render.x / max(render.y, 1.0);
-    float tan_half_fov = tan(render.z * 0.5);
     vec2 ndc = vec2(screen_uv.x * 2.0 - 1.0, 1.0 - screen_uv.y * 2.0);
 
-    return normalize(
-        forward
-            + right * ndc.x * aspect * tan_half_fov
-            + up * ndc.y * tan_half_fov
-    );
+    return normalize(ray_forward.xyz + ray_right.xyz * ndc.x + ray_up.xyz * ndc.y);
 }
 
 float terrain_delta(vec3 point) {
