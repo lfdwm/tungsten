@@ -119,7 +119,7 @@ float raymarch_step_size(float horizontal_dist) {
     float lod_blend = smoothstep(lod_distances.x, lod_distances.y, horizontal_dist);
     float near_step = 0.55 + horizontal_dist * 0.0055;
     float far_step = 1.0 + horizontal_dist * 0.0095;
-    return clamp(mix(near_step, far_step, lod_blend), 0.45, 24.0);
+    return clamp(mix(near_step, far_step, lod_blend), 0.45, 4.0);
 }
 
 bool refine_terrain_hit(vec3 origin, vec3 ray, float low, float high, out vec3 hit_pos, out float hit_dist) {
@@ -170,7 +170,7 @@ bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dis
         return true;
     }
 
-    for (int i = 0; i < 360; i++) {
+    for (int i = 0; i < 700; i++) {
         float step_size = raymarch_step_size(previous_horizontal);
         float t = previous_t + step_size / ray_horizontal;
 
