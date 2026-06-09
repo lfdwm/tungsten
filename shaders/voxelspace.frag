@@ -1,34 +1,58 @@
 #version 450
 
 layout(set = 2, binding = 0) uniform sampler2D color_map;
-layout(set = 2, binding = 1) uniform sampler2D height_map;
+layout(set = 2, binding = 1) uniform sampler2D height_near_map;
+layout(set = 2, binding = 2) uniform sampler2D height_far_map;
 
 layout(set = 3, binding = 0) uniform Params {
     vec4 camera;
     vec4 render;
-    vec4 maps;
-    vec4 tuning;
+    vec4 terrain;
+    vec4 height_maps;
+    vec4 lod_distances;
+    vec4 raymarch;
 };
 
 layout(location = 0) in vec2 frag_uv;
 layout(location = 0) out vec4 out_color;
 
-ivec2 wrap_height_cell(ivec2 cell) {
-    ivec2 map_size = ivec2(int(maps.z), int(maps.w));
+ivec2 wrap_cell(ivec2 cell, ivec2 map_size) {
     ivec2 wrapped = cell % map_size;
     return (wrapped + map_size) % map_size;
 }
 
-float height_cell(ivec2 cell) {
-    return texelFetch(height_map, wrap_height_cell(cell), 0).r * render.w;
+float height_cell(sampler2D height_map, vec2 world_pos, vec2 map_size) {
+    vec2 terrain_uv = world_pos / terrain.xy;
+    ivec2 cell = ivec2(floor(terrain_uv * map_size));
+    return texelFetch(height_map, wrap_cell(cell, ivec2(map_size)), 0).r * render.w;
 }
 
 float height_at(vec2 world_pos) {
-    return height_cell(ivec2(floor(world_pos)));
+    float dist = distance(world_pos, camera.xy);
+    float blend = smoothstep(lod_distances.x, lod_distances.y, dist);
+
+    if (blend <= 0.0) {
+        return height_cell(height_near_map, world_pos, height_maps.xy);
+    }
+    if (blend >= 1.0) {
+        return height_cell(height_far_map, world_pos, height_maps.zw);
+    }
+
+    float near_height = height_cell(height_near_map, world_pos, height_maps.xy);
+    float far_height = height_cell(height_far_map, world_pos, height_maps.zw);
+    return mix(near_height, far_height, blend);
+}
+
+float height_sample_radius(vec2 world_pos) {
+    float dist = distance(world_pos, camera.xy);
+    float blend = smoothstep(lod_distances.x, lod_distances.y, dist);
+    float near_cell_size = terrain.x / height_maps.x;
+    float far_cell_size = terrain.x / height_maps.z;
+    return mix(near_cell_size, far_cell_size, blend);
 }
 
 vec3 color_at(vec2 world_pos) {
-    return textureLod(color_map, world_pos / maps.xy, 0.0).rgb;
+    return textureLod(color_map, world_pos / terrain.xy, 0.0).rgb;
 }
 
 vec3 sky_color(float ray_y) {
@@ -43,7 +67,7 @@ vec3 camera_origin() {
 
 vec3 ray_direction(vec2 screen_uv) {
     float yaw = camera.w;
-    float pitch = tuning.x;
+    float pitch = raymarch.x;
     float sin_yaw = sin(yaw);
     float cos_yaw = cos(yaw);
     float sin_pitch = sin(pitch);
@@ -71,12 +95,13 @@ float terrain_delta(vec3 point) {
 }
 
 vec3 terrain_normal(vec2 world_pos) {
-    float h_left = height_at(world_pos - vec2(1.0, 0.0));
-    float h_right = height_at(world_pos + vec2(1.0, 0.0));
-    float h_back = height_at(world_pos - vec2(0.0, 1.0));
-    float h_front = height_at(world_pos + vec2(0.0, 1.0));
+    float sample_radius = height_sample_radius(world_pos);
+    float h_left = height_at(world_pos - vec2(sample_radius, 0.0));
+    float h_right = height_at(world_pos + vec2(sample_radius, 0.0));
+    float h_back = height_at(world_pos - vec2(0.0, sample_radius));
+    float h_front = height_at(world_pos + vec2(0.0, sample_radius));
 
-    return normalize(vec3(h_left - h_right, 2.0, h_back - h_front));
+    return normalize(vec3(h_left - h_right, sample_radius * 2.0, h_back - h_front));
 }
 
 vec3 terrain_color(vec3 hit_pos) {
@@ -91,8 +116,8 @@ vec3 terrain_color(vec3 hit_pos) {
 }
 
 bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dist) {
-    float t = max(tuning.y, 0.05);
-    float max_dist = tuning.z;
+    float t = max(raymarch.y, 0.05);
+    float max_dist = raymarch.z;
     float previous_t = t;
 
     if (terrain_delta(origin + ray * previous_t) <= 0.0) {
@@ -148,7 +173,7 @@ void main() {
     float hit_dist;
 
     if (raymarch_terrain(origin, ray, hit_pos, hit_dist)) {
-        float fog = smoothstep(tuning.z * 0.34, tuning.z, hit_dist);
+        float fog = smoothstep(raymarch.z * 0.34, raymarch.z, hit_dist);
         vec3 color = mix(terrain_color(hit_pos), sky, fog * 0.86);
         out_color = vec4(color, 1.0);
     } else {

@@ -21,17 +21,27 @@ use sdl3::{
 const WINDOW_WIDTH: u32 = 1280;
 const WINDOW_HEIGHT: u32 = 720;
 const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 4096_diffuse.png";
-const HEIGHT_MAP_PATH: &str = "assets/untracked/continent Height Output 4096.r16";
-const HEIGHT_MAP_WIDTH: u32 = 4096;
-const HEIGHT_MAP_HEIGHT: u32 = 4096;
+const HEIGHT_MAP_NEAR_PATH: &str = "assets/untracked/continent Height Output 8192.r16";
+const HEIGHT_MAP_FAR_PATH: &str = "assets/untracked/continent Height Output 2048.r16";
+const HEIGHT_MAP_NEAR_WIDTH: u32 = 8192;
+const HEIGHT_MAP_NEAR_HEIGHT: u32 = 8192;
+const HEIGHT_MAP_FAR_WIDTH: u32 = 2048;
+const HEIGHT_MAP_FAR_HEIGHT: u32 = 2048;
+const TERRAIN_HORIZONTAL_SCALE: f32 = 0.5;
+const HEIGHT_SCALE: f32 = 255.0 * 1.7;
+const RAYMARCH_START_DISTANCE: f32 = 1.0;
+const HEIGHT_LOD_BLEND_START: f32 = 125.0;
+const HEIGHT_LOD_BLEND_END: f32 = 300.0;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct ShaderParams {
     camera: [f32; 4],
     render: [f32; 4],
-    maps: [f32; 4],
-    tuning: [f32; 4],
+    terrain: [f32; 4],
+    height_maps: [f32; 4],
+    lod_distances: [f32; 4],
+    raymarch: [f32; 4],
 }
 
 struct Camera {
@@ -46,11 +56,14 @@ struct Camera {
 
 struct TerrainMaps {
     color: Texture<'static>,
-    height: Texture<'static>,
+    height_near: Texture<'static>,
+    height_far: Texture<'static>,
     color_sampler: Sampler,
     height_sampler: Sampler,
+    terrain_size: [f32; 2],
     color_size: [f32; 2],
-    height_size: [f32; 2],
+    height_near_size: [f32; 2],
+    height_far_size: [f32; 2],
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -124,7 +137,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .with_texture(&terrain_maps.color)
                         .with_sampler(&terrain_maps.color_sampler),
                     TextureSamplerBinding::new()
-                        .with_texture(&terrain_maps.height)
+                        .with_texture(&terrain_maps.height_near)
+                        .with_sampler(&terrain_maps.height_sampler),
+                    TextureSamplerBinding::new()
+                        .with_texture(&terrain_maps.height_far)
                         .with_sampler(&terrain_maps.height_sampler),
                 ],
             );
@@ -161,7 +177,7 @@ fn create_pipeline(
             include_bytes!(concat!(env!("OUT_DIR"), "/voxelspace.frag.spv")),
             ShaderStage::Fragment,
         )
-        .with_samplers(2)
+        .with_samplers(3)
         .with_uniform_buffers(1)
         .with_entrypoint(c"main")
         .build()?;
@@ -189,16 +205,28 @@ fn load_terrain_maps(gpu: &Device) -> Result<TerrainMaps, Box<dyn Error>> {
 
     let color_image = image::open(COLOR_MAP_PATH)?;
     let color_size = [color_image.width() as f32, color_image.height() as f32];
-    let height_size = [HEIGHT_MAP_WIDTH as f32, HEIGHT_MAP_HEIGHT as f32];
+    let terrain_size = [
+        HEIGHT_MAP_NEAR_WIDTH as f32 * TERRAIN_HORIZONTAL_SCALE,
+        HEIGHT_MAP_NEAR_HEIGHT as f32 * TERRAIN_HORIZONTAL_SCALE,
+    ];
+    let height_near_size = [HEIGHT_MAP_NEAR_WIDTH as f32, HEIGHT_MAP_NEAR_HEIGHT as f32];
+    let height_far_size = [HEIGHT_MAP_FAR_WIDTH as f32, HEIGHT_MAP_FAR_HEIGHT as f32];
 
     let color =
         create_texture_from_rgba8(gpu, &copy_pass, color_image, TextureFormat::R8g8b8a8Unorm)?;
-    let height = create_texture_from_r16(
+    let height_near = create_texture_from_r16(
         gpu,
         &copy_pass,
-        HEIGHT_MAP_PATH,
-        HEIGHT_MAP_WIDTH,
-        HEIGHT_MAP_HEIGHT,
+        HEIGHT_MAP_NEAR_PATH,
+        HEIGHT_MAP_NEAR_WIDTH,
+        HEIGHT_MAP_NEAR_HEIGHT,
+    )?;
+    let height_far = create_texture_from_r16(
+        gpu,
+        &copy_pass,
+        HEIGHT_MAP_FAR_PATH,
+        HEIGHT_MAP_FAR_WIDTH,
+        HEIGHT_MAP_FAR_HEIGHT,
     )?;
     let color_sampler = gpu.create_sampler(
         SamplerCreateInfo::new()
@@ -224,11 +252,14 @@ fn load_terrain_maps(gpu: &Device) -> Result<TerrainMaps, Box<dyn Error>> {
 
     Ok(TerrainMaps {
         color,
-        height,
+        height_near,
+        height_far,
         color_sampler,
         height_sampler,
+        terrain_size,
         color_size,
-        height_size,
+        height_near_size,
+        height_far_size,
     })
 }
 
@@ -392,13 +423,30 @@ fn shader_params(
 ) -> ShaderParams {
     ShaderParams {
         camera: [camera.x, camera.y, camera.height, camera.yaw],
-        render: [width as f32, height as f32, camera.vertical_fov, 255.0],
-        maps: [
+        render: [
+            width as f32,
+            height as f32,
+            camera.vertical_fov,
+            HEIGHT_SCALE,
+        ],
+        terrain: [
+            terrain_maps.terrain_size[0],
+            terrain_maps.terrain_size[1],
             terrain_maps.color_size[0],
             terrain_maps.color_size[1],
-            terrain_maps.height_size[0],
-            terrain_maps.height_size[1],
         ],
-        tuning: [camera.pitch, 1.0, camera.max_distance, 0.0],
+        height_maps: [
+            terrain_maps.height_near_size[0],
+            terrain_maps.height_near_size[1],
+            terrain_maps.height_far_size[0],
+            terrain_maps.height_far_size[1],
+        ],
+        lod_distances: [HEIGHT_LOD_BLEND_START, HEIGHT_LOD_BLEND_END, 0.0, 0.0],
+        raymarch: [
+            camera.pitch,
+            RAYMARCH_START_DISTANCE,
+            camera.max_distance,
+            0.0,
+        ],
     }
 }
