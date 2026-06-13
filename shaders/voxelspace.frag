@@ -78,6 +78,43 @@ float terrain_delta(vec3 point) {
     return point.y - height_at(point.xz);
 }
 
+bool clip_ray_axis(
+    float origin_axis,
+    float ray_axis,
+    float bounds_min,
+    float bounds_max,
+    inout float enter_t,
+    inout float exit_t
+) {
+    if (abs(ray_axis) < 0.0001) {
+        return origin_axis >= bounds_min && origin_axis <= bounds_max;
+    }
+
+    float t0 = (bounds_min - origin_axis) / ray_axis;
+    float t1 = (bounds_max - origin_axis) / ray_axis;
+
+    if (t0 > t1) {
+        float swap_t = t0;
+        t0 = t1;
+        t1 = swap_t;
+    }
+
+    enter_t = max(enter_t, t0);
+    exit_t = min(exit_t, t1);
+    return enter_t <= exit_t;
+}
+
+bool terrain_bounds_interval(vec3 origin, vec3 ray, out float enter_t, out float exit_t) {
+    enter_t = 0.0;
+    exit_t = 1.0e30;
+
+    bool inside_x = clip_ray_axis(origin.x, ray.x, 0.0, terrain.x, enter_t, exit_t);
+    bool inside_y = clip_ray_axis(origin.y, ray.y, 0.0, render.w, enter_t, exit_t);
+    bool inside_z = clip_ray_axis(origin.z, ray.z, 0.0, terrain.y, enter_t, exit_t);
+
+    return inside_x && inside_y && inside_z && exit_t >= max(enter_t, 0.0);
+}
+
 vec3 terrain_normal(vec2 world_pos) {
     float sample_radius = height_sample_radius(world_pos);
     float h_left = height_at(world_pos - vec2(sample_radius, 0.0));
@@ -142,9 +179,21 @@ bool probe_large_step(vec3 origin, vec3 ray, float low, float high, out vec3 hit
 }
 
 bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dist) {
-    float previous_t = max(raymarch.y, 0.05);
+    float bounds_enter_t;
+    float bounds_exit_t;
+
+    if (!terrain_bounds_interval(origin, ray, bounds_enter_t, bounds_exit_t)) {
+        return false;
+    }
+
+    float previous_t = max(max(raymarch.y, 0.05), bounds_enter_t);
     float ray_horizontal = max(length(ray.xz), 0.001);
-    float max_t = raymarch.z / ray_horizontal;
+    float max_t = min(raymarch.z / ray_horizontal, bounds_exit_t);
+
+    if (previous_t > max_t) {
+        return false;
+    }
+
     float previous_delta = terrain_delta(origin + ray * previous_t);
     float previous_horizontal = previous_t * ray_horizontal;
 
