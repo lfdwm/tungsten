@@ -20,6 +20,9 @@ layout(location = 0) in vec2 frag_uv;
 layout(location = 0) out vec4 out_color;
 
 const float FAR_TERRAIN_LIGHT = 0.84;
+const int HIT_REFINE_NEAR_STEPS = 6;
+const int HIT_REFINE_MID_STEPS = 5;
+const int HIT_REFINE_FAR_STEPS = 4;
 
 float height_cell(sampler2D height_map, vec2 world_pos, vec2 map_size) {
     vec2 terrain_uv = world_pos / terrain.xy;
@@ -151,6 +154,16 @@ float raymarch_step_size(float horizontal_dist, float lod_blend) {
     return clamp(mix(near_step, far_step, lod_blend), 0.45, 4.0);
 }
 
+int hit_refine_steps(float horizontal_dist) {
+    if (horizontal_dist >= lod_distances.w) {
+        return HIT_REFINE_FAR_STEPS;
+    }
+    if (horizontal_dist >= lod_distances.y) {
+        return HIT_REFINE_MID_STEPS;
+    }
+    return HIT_REFINE_NEAR_STEPS;
+}
+
 bool refine_terrain_hit(
     vec3 origin,
     vec3 ray,
@@ -161,7 +174,12 @@ bool refine_terrain_hit(
     out float hit_dist,
     out float hit_horizontal_dist
 ) {
-    for (int j = 0; j < 8; j++) {
+    int refine_steps = hit_refine_steps(high * ray_horizontal);
+    for (int j = 0; j < HIT_REFINE_NEAR_STEPS; j++) {
+        if (j >= refine_steps) {
+            break;
+        }
+
         float mid = (low + high) * 0.5;
         float mid_horizontal = mid * ray_horizontal;
         float mid_delta = terrain_delta(origin + ray * mid, height_lod_blend(mid_horizontal));
