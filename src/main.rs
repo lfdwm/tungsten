@@ -32,6 +32,8 @@ const HEIGHT_SCALE: f32 = 255.0 * 1.7;
 const RAYMARCH_START_DISTANCE: f32 = 1.0;
 const HEIGHT_LOD_BLEND_START: f32 = 125.0;
 const HEIGHT_LOD_BLEND_END: f32 = 300.0;
+const NORMAL_DETAIL_BLEND_START: f32 = HEIGHT_LOD_BLEND_END;
+const NORMAL_DETAIL_BLEND_END: f32 = 850.0;
 const PERFORMANCE_RENDER_SCALE: f32 = 0.5;
 
 #[repr(C)]
@@ -591,7 +593,12 @@ fn shader_params(
             terrain_maps.height_far_size[0],
             terrain_maps.height_far_size[1],
         ],
-        lod_distances: [HEIGHT_LOD_BLEND_START, HEIGHT_LOD_BLEND_END, 0.0, 0.0],
+        lod_distances: [
+            HEIGHT_LOD_BLEND_START,
+            HEIGHT_LOD_BLEND_END,
+            NORMAL_DETAIL_BLEND_START,
+            NORMAL_DETAIL_BLEND_END,
+        ],
         raymarch: [
             camera.pitch,
             RAYMARCH_START_DISTANCE,

@@ -19,6 +19,8 @@ layout(set = 3, binding = 0) uniform Params {
 layout(location = 0) in vec2 frag_uv;
 layout(location = 0) out vec4 out_color;
 
+const float FAR_TERRAIN_LIGHT = 0.84;
+
 float height_cell(sampler2D height_map, vec2 world_pos, vec2 map_size) {
     vec2 terrain_uv = world_pos / terrain.xy;
     ivec2 size = ivec2(map_size);
@@ -120,16 +122,27 @@ vec3 terrain_normal(vec2 world_pos, float lod_blend) {
     return normalize(vec3(h_left - h_right, sample_radius * 2.0, h_back - h_front));
 }
 
-vec3 terrain_color(vec3 hit_pos, float horizontal_dist) {
-    vec2 world_pos = hit_pos.xz;
-    float lod_blend = height_lod_blend(horizontal_dist);
-    vec3 base = color_at(world_pos);
-    vec3 normal = terrain_normal(world_pos, lod_blend);
+float terrain_light(vec3 normal) {
     vec3 sun_dir = normalize(vec3(-0.45, 0.78, -0.34));
     float diffuse = clamp(dot(normal, sun_dir), 0.0, 1.0);
     float sky_fill = clamp(normal.y, 0.0, 1.0);
 
-    return base * (0.48 + diffuse * 0.44 + sky_fill * 0.12);
+    return 0.48 + diffuse * 0.44 + sky_fill * 0.12;
+}
+
+vec3 terrain_color(vec3 hit_pos, float horizontal_dist) {
+    vec2 world_pos = hit_pos.xz;
+    float lod_blend = height_lod_blend(horizontal_dist);
+    float normal_blend = smoothstep(lod_distances.z, lod_distances.w, horizontal_dist);
+    vec3 base = color_at(world_pos);
+    float light = FAR_TERRAIN_LIGHT;
+
+    if (normal_blend < 1.0) {
+        float detailed_light = terrain_light(terrain_normal(world_pos, lod_blend));
+        light = mix(detailed_light, FAR_TERRAIN_LIGHT, normal_blend);
+    }
+
+    return base * light;
 }
 
 float raymarch_step_size(float horizontal_dist, float lod_blend) {
