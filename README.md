@@ -1,16 +1,10 @@
 # tungsten
 
-## Runtime Profile
+## Render Resolution
 
-The app defaults to the performance profile, which renders terrain at half window resolution and nearest-upscales it.
+The app renders terrain at half window resolution and nearest-upscales it to the window.
 
-Use the native-resolution profile with:
-
-```sh
-TUNGSTEN_PROFILE=quality cargo run
-```
-
-Tune the performance profile in `src/main.rs` with `PERFORMANCE_RENDER_SCALE`.
+Tune the internal render scale in `src/main.rs` with `PERFORMANCE_RENDER_SCALE`.
 
 ## Tools
 

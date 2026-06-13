@@ -1,5 +1,4 @@
 use std::{
-    env,
     error::Error,
     fs,
     time::{Duration, Instant},
@@ -71,43 +70,7 @@ struct TerrainMaps {
     height_far_size: [f32; 2],
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RenderProfile {
-    Quality,
-    Performance,
-}
-
-impl RenderProfile {
-    fn from_env() -> Self {
-        match env::var("TUNGSTEN_PROFILE") {
-            Ok(profile) if profile.eq_ignore_ascii_case("quality") => Self::Quality,
-            _ => Self::Performance,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Quality => "quality",
-            Self::Performance => "performance",
-        }
-    }
-
-    fn uses_offscreen_target(self) -> bool {
-        self == Self::Performance
-    }
-
-    fn render_size(self, window_width: u32, window_height: u32) -> [u32; 2] {
-        match self {
-            Self::Quality => [window_width.max(1), window_height.max(1)],
-            Self::Performance => [
-                scaled_render_dimension(window_width),
-                scaled_render_dimension(window_height),
-            ],
-        }
-    }
-}
-
-struct ProfileRenderTarget {
+struct RenderTarget {
     texture: Texture<'static>,
     width: u32,
     height: u32,
@@ -116,11 +79,9 @@ struct ProfileRenderTarget {
 fn main() -> Result<(), Box<dyn Error>> {
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
-    let render_profile = RenderProfile::from_env();
-    let window_title = format!("tungsten - SDL_GPU VoxelSpace ({})", render_profile.name());
 
     let window = video
-        .window(&window_title, WINDOW_WIDTH, WINDOW_HEIGHT)
+        .window("tungsten - SDL_GPU VoxelSpace", WINDOW_WIDTH, WINDOW_HEIGHT)
         .position_centered()
         .resizable()
         .build()?;
@@ -131,7 +92,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let upscale_pipeline = create_upscale_pipeline(&gpu, target_format)?;
     let terrain_maps = load_terrain_maps(&gpu)?;
     let upscale_sampler = create_upscale_sampler(&gpu)?;
-    let mut profile_render_target = None;
+    let mut render_target = None;
     let mouse = sdl.mouse();
     mouse.set_relative_mouse_mode(&window, true);
     mouse.show_cursor(false);
@@ -172,104 +133,68 @@ fn main() -> Result<(), Box<dyn Error>> {
         update_camera(&events, &mut camera, dt.as_secs_f32(), mouse_delta);
 
         let (window_width, window_height) = window.size();
-        ensure_profile_render_target(
+        ensure_render_target(
             &gpu,
-            &mut profile_render_target,
-            render_profile,
+            &mut render_target,
             target_format,
             window_width,
             window_height,
         )?;
+        let render_target = render_target
+            .as_ref()
+            .expect("render target should be initialized before drawing");
 
         let mut command_buffer = gpu.acquire_command_buffer()?;
-        if let Some(render_target) = profile_render_target.as_ref() {
-            let params = shader_params(
-                &camera,
-                &terrain_maps,
-                render_target.width,
-                render_target.height,
-            );
+        let params = shader_params(
+            &camera,
+            &terrain_maps,
+            render_target.width,
+            render_target.height,
+        );
 
-            let color_targets = [ColorTargetInfo::default()
-                .with_texture(&render_target.texture)
-                .with_load_op(LoadOp::CLEAR)
-                .with_store_op(StoreOp::STORE)
-                .with_clear_color(Color::RGB(105, 136, 157))];
+        let color_targets = [ColorTargetInfo::default()
+            .with_texture(&render_target.texture)
+            .with_load_op(LoadOp::CLEAR)
+            .with_store_op(StoreOp::STORE)
+            .with_clear_color(Color::RGB(105, 136, 157))];
 
-            let render_pass = gpu.begin_render_pass(&command_buffer, &color_targets, None)?;
-            render_pass.bind_graphics_pipeline(&terrain_pipeline);
-            render_pass.bind_fragment_samplers(
-                0,
-                &[
-                    TextureSamplerBinding::new()
-                        .with_texture(&terrain_maps.color)
-                        .with_sampler(&terrain_maps.color_sampler),
-                    TextureSamplerBinding::new()
-                        .with_texture(&terrain_maps.height_near)
-                        .with_sampler(&terrain_maps.height_sampler),
-                    TextureSamplerBinding::new()
-                        .with_texture(&terrain_maps.height_far)
-                        .with_sampler(&terrain_maps.height_sampler),
-                ],
-            );
-            command_buffer.push_fragment_uniform_data(0, &params);
-            render_pass.draw_primitives(3, 1, 0, 0);
-            gpu.end_render_pass(render_pass);
+        let render_pass = gpu.begin_render_pass(&command_buffer, &color_targets, None)?;
+        render_pass.bind_graphics_pipeline(&terrain_pipeline);
+        render_pass.bind_fragment_samplers(
+            0,
+            &[
+                TextureSamplerBinding::new()
+                    .with_texture(&terrain_maps.color)
+                    .with_sampler(&terrain_maps.color_sampler),
+                TextureSamplerBinding::new()
+                    .with_texture(&terrain_maps.height_near)
+                    .with_sampler(&terrain_maps.height_sampler),
+                TextureSamplerBinding::new()
+                    .with_texture(&terrain_maps.height_far)
+                    .with_sampler(&terrain_maps.height_sampler),
+            ],
+        );
+        command_buffer.push_fragment_uniform_data(0, &params);
+        render_pass.draw_primitives(3, 1, 0, 0);
+        gpu.end_render_pass(render_pass);
 
-            if let Ok(swapchain) = command_buffer.wait_and_acquire_swapchain_texture(&window) {
-                let color_targets = [ColorTargetInfo::default()
-                    .with_texture(&swapchain)
-                    .with_load_op(LoadOp::CLEAR)
-                    .with_store_op(StoreOp::STORE)
-                    .with_clear_color(Color::RGB(105, 136, 157))];
-
-                let upscale_pass = gpu.begin_render_pass(&command_buffer, &color_targets, None)?;
-                upscale_pass.bind_graphics_pipeline(&upscale_pipeline);
-                upscale_pass.bind_fragment_samplers(
-                    0,
-                    &[TextureSamplerBinding::new()
-                        .with_texture(&render_target.texture)
-                        .with_sampler(&upscale_sampler)],
-                );
-                upscale_pass.draw_primitives(3, 1, 0, 0);
-                gpu.end_render_pass(upscale_pass);
-                command_buffer.submit()?;
-            } else {
-                command_buffer.cancel();
-            }
-        } else if let Ok(swapchain) = command_buffer.wait_and_acquire_swapchain_texture(&window) {
-            let params = shader_params(
-                &camera,
-                &terrain_maps,
-                swapchain.width(),
-                swapchain.height(),
-            );
-
+        if let Ok(swapchain) = command_buffer.wait_and_acquire_swapchain_texture(&window) {
             let color_targets = [ColorTargetInfo::default()
                 .with_texture(&swapchain)
                 .with_load_op(LoadOp::CLEAR)
                 .with_store_op(StoreOp::STORE)
                 .with_clear_color(Color::RGB(105, 136, 157))];
 
-            let render_pass = gpu.begin_render_pass(&command_buffer, &color_targets, None)?;
-            render_pass.bind_graphics_pipeline(&terrain_pipeline);
-            render_pass.bind_fragment_samplers(
+            let upscale_pass = gpu.begin_render_pass(&command_buffer, &color_targets, None)?;
+            upscale_pass.bind_graphics_pipeline(&upscale_pipeline);
+            upscale_pass.bind_fragment_samplers(
                 0,
-                &[
-                    TextureSamplerBinding::new()
-                        .with_texture(&terrain_maps.color)
-                        .with_sampler(&terrain_maps.color_sampler),
-                    TextureSamplerBinding::new()
-                        .with_texture(&terrain_maps.height_near)
-                        .with_sampler(&terrain_maps.height_sampler),
-                    TextureSamplerBinding::new()
-                        .with_texture(&terrain_maps.height_far)
-                        .with_sampler(&terrain_maps.height_sampler),
-                ],
+                &[TextureSamplerBinding::new()
+                    .with_texture(&render_target.texture)
+                    .with_sampler(&upscale_sampler)],
             );
-            command_buffer.push_fragment_uniform_data(0, &params);
-            render_pass.draw_primitives(3, 1, 0, 0);
-            gpu.end_render_pass(render_pass);
+            upscale_pass.draw_primitives(3, 1, 0, 0);
+            gpu.end_render_pass(upscale_pass);
 
             command_buffer.submit()?;
         } else {
@@ -367,27 +292,22 @@ fn scaled_render_dimension(window_dimension: u32) -> u32 {
     ((window_dimension as f32 * PERFORMANCE_RENDER_SCALE).round() as u32).max(1)
 }
 
-fn ensure_profile_render_target(
+fn ensure_render_target(
     gpu: &Device,
-    render_target: &mut Option<ProfileRenderTarget>,
-    profile: RenderProfile,
+    render_target: &mut Option<RenderTarget>,
     format: TextureFormat,
     window_width: u32,
     window_height: u32,
 ) -> Result<(), Box<dyn Error>> {
-    if !profile.uses_offscreen_target() {
-        *render_target = None;
-        return Ok(());
-    }
-
-    let [width, height] = profile.render_size(window_width, window_height);
+    let width = scaled_render_dimension(window_width);
+    let height = scaled_render_dimension(window_height);
     let needs_recreate = match render_target {
         Some(target) => target.width != width || target.height != height,
         None => true,
     };
 
     if needs_recreate {
-        *render_target = Some(ProfileRenderTarget {
+        *render_target = Some(RenderTarget {
             texture: create_color_target_texture(gpu, width, height, format)?,
             width,
             height,
