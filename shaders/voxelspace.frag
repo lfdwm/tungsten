@@ -20,6 +20,7 @@ layout(location = 0) in vec2 frag_uv;
 layout(location = 0) out vec4 out_color;
 
 const float FAR_TERRAIN_LIGHT = 0.84;
+const int MAX_RAY_ITERATIONS = 4096;
 const int HIT_REFINE_NEAR_STEPS = 6;
 const int HIT_REFINE_MID_STEPS = 5;
 const int HIT_REFINE_FAR_STEPS = 4;
@@ -229,6 +230,7 @@ bool probe_large_step(
 bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dist, out float hit_horizontal_dist) {
     float bounds_enter_t;
     float bounds_exit_t;
+    int iteration_count = clamp(int(raymarch.w + 0.5), 1, MAX_RAY_ITERATIONS);
 
     if (!terrain_bounds_interval(origin, ray, bounds_enter_t, bounds_exit_t)) {
         return false;
@@ -253,7 +255,7 @@ bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dis
         return true;
     }
 
-    for (int i = 0; i < 700; i++) {
+    for (int i = 0; i < iteration_count; i++) {
         float step_size = raymarch_step_size(previous_horizontal, previous_lod_blend);
         float t = previous_t + step_size / ray_horizontal;
 

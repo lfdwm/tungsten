@@ -1,10 +1,21 @@
 # tungsten
 
-## Render Resolution
+## Runtime Config
 
-The app renders terrain at half window resolution and nearest-upscales it to the window.
+Runtime rendering knobs live in `config.toml`:
 
-Tune the internal render scale in `src/main.rs` with `PERFORMANCE_RENDER_SCALE`.
+```toml
+ray_iteration_count = 700
+performance_render_scale = 0.5
+
+height_lod_blend_start = 125.0
+height_lod_blend_end = 300.0
+
+normal_detail_blend_start = 500.0
+normal_detail_blend_end = 1000.0
+```
+
+The config is loaded once at startup. Missing keys fall back to the built-in defaults.
 
 ## Tools
 

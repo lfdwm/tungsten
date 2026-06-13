@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    fs,
+    fs, io,
     time::{Duration, Instant},
 };
 
@@ -20,6 +20,7 @@ use sdl3::{
 
 const WINDOW_WIDTH: u32 = 1280;
 const WINDOW_HEIGHT: u32 = 720;
+const CONFIG_PATH: &str = "config.toml";
 const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 4096_diffuse.png";
 const HEIGHT_MAP_NEAR_PATH: &str = "assets/untracked/continent Height Output 8192.r16";
 const HEIGHT_MAP_FAR_PATH: &str = "assets/untracked/continent Height Max 1024.r16";
@@ -30,11 +31,13 @@ const HEIGHT_MAP_FAR_HEIGHT: u32 = 1024;
 const TERRAIN_HORIZONTAL_SCALE: f32 = 0.5;
 const HEIGHT_SCALE: f32 = 255.0 * 1.7;
 const RAYMARCH_START_DISTANCE: f32 = 1.0;
-const HEIGHT_LOD_BLEND_START: f32 = 125.0;
-const HEIGHT_LOD_BLEND_END: f32 = 300.0;
-const NORMAL_DETAIL_BLEND_START: f32 = 500.0;
-const NORMAL_DETAIL_BLEND_END: f32 = 1000.0;
-const PERFORMANCE_RENDER_SCALE: f32 = 0.5;
+const DEFAULT_RAY_ITERATION_COUNT: u32 = 700;
+const MAX_RAY_ITERATION_COUNT: u32 = 4096;
+const DEFAULT_HEIGHT_LOD_BLEND_START: f32 = 125.0;
+const DEFAULT_HEIGHT_LOD_BLEND_END: f32 = 300.0;
+const DEFAULT_NORMAL_DETAIL_BLEND_START: f32 = 500.0;
+const DEFAULT_NORMAL_DETAIL_BLEND_END: f32 = 1000.0;
+const DEFAULT_PERFORMANCE_RENDER_SCALE: f32 = 0.5;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -78,7 +81,167 @@ struct RenderTarget {
     height: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AppConfig {
+    ray_iteration_count: u32,
+    performance_render_scale: f32,
+    normal_detail_blend_start: f32,
+    normal_detail_blend_end: f32,
+    height_lod_blend_start: f32,
+    height_lod_blend_end: f32,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            ray_iteration_count: DEFAULT_RAY_ITERATION_COUNT,
+            performance_render_scale: DEFAULT_PERFORMANCE_RENDER_SCALE,
+            normal_detail_blend_start: DEFAULT_NORMAL_DETAIL_BLEND_START,
+            normal_detail_blend_end: DEFAULT_NORMAL_DETAIL_BLEND_END,
+            height_lod_blend_start: DEFAULT_HEIGHT_LOD_BLEND_START,
+            height_lod_blend_end: DEFAULT_HEIGHT_LOD_BLEND_END,
+        }
+    }
+}
+
+impl AppConfig {
+    fn load(path: &str) -> Result<Self, Box<dyn Error>> {
+        match fs::read_to_string(path) {
+            Ok(contents) => {
+                Self::parse(&contents).map_err(|error| format!("{path}: {error}").into())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(format!("failed to read {path}: {error}").into()),
+        }
+    }
+
+    fn parse(contents: &str) -> Result<Self, String> {
+        let mut config = Self::default();
+        let mut seen_keys = Vec::new();
+
+        for (line_index, raw_line) in contents.lines().enumerate() {
+            let line_number = line_index + 1;
+            let line = raw_line
+                .split_once('#')
+                .map_or(raw_line, |(before_comment, _)| before_comment)
+                .trim();
+
+            if line.is_empty() {
+                continue;
+            }
+            if line.starts_with('[') {
+                return Err(format!(
+                    "line {line_number}: tables are not supported; use flat `key = value` entries"
+                ));
+            }
+
+            let (key, value) = line
+                .split_once('=')
+                .ok_or_else(|| format!("line {line_number}: expected `key = value`"))?;
+            let key = key.trim();
+            let value = value.trim();
+
+            if key.is_empty() {
+                return Err(format!("line {line_number}: config key is empty"));
+            }
+            if value.is_empty() {
+                return Err(format!("line {line_number}: value for `{key}` is empty"));
+            }
+            if seen_keys.iter().any(|seen_key| seen_key == key) {
+                return Err(format!("line {line_number}: duplicate config key `{key}`"));
+            }
+            seen_keys.push(key.to_owned());
+
+            match key {
+                "ray_iteration_count" => {
+                    config.ray_iteration_count = parse_config_u32(key, value, line_number)?
+                }
+                "performance_render_scale" => {
+                    config.performance_render_scale = parse_config_f32(key, value, line_number)?
+                }
+                "normal_detail_blend_start" => {
+                    config.normal_detail_blend_start = parse_config_f32(key, value, line_number)?
+                }
+                "normal_detail_blend_end" => {
+                    config.normal_detail_blend_end = parse_config_f32(key, value, line_number)?
+                }
+                "height_lod_blend_start" => {
+                    config.height_lod_blend_start = parse_config_f32(key, value, line_number)?
+                }
+                "height_lod_blend_end" => {
+                    config.height_lod_blend_end = parse_config_f32(key, value, line_number)?
+                }
+                _ => return Err(format!("line {line_number}: unknown config key `{key}`")),
+            }
+        }
+
+        config.validate()
+    }
+
+    fn validate(self) -> Result<Self, String> {
+        if !(1..=MAX_RAY_ITERATION_COUNT).contains(&self.ray_iteration_count) {
+            return Err(format!(
+                "`ray_iteration_count` must be between 1 and {MAX_RAY_ITERATION_COUNT}"
+            ));
+        }
+        if !(self.performance_render_scale > 0.0 && self.performance_render_scale <= 1.0) {
+            return Err(
+                "`performance_render_scale` must be greater than 0.0 and no more than 1.0"
+                    .to_owned(),
+            );
+        }
+        validate_blend_range(
+            "height_lod",
+            self.height_lod_blend_start,
+            self.height_lod_blend_end,
+        )?;
+        validate_blend_range(
+            "normal_detail",
+            self.normal_detail_blend_start,
+            self.normal_detail_blend_end,
+        )?;
+
+        Ok(self)
+    }
+}
+
+fn parse_config_u32(key: &str, value: &str, line_number: usize) -> Result<u32, String> {
+    let normalized = value.replace('_', "");
+    normalized
+        .parse()
+        .map_err(|_| format!("line {line_number}: `{key}` must be an unsigned integer"))
+}
+
+fn parse_config_f32(key: &str, value: &str, line_number: usize) -> Result<f32, String> {
+    let normalized = value.replace('_', "");
+    let parsed: f32 = normalized
+        .parse()
+        .map_err(|_| format!("line {line_number}: `{key}` must be a number"))?;
+
+    if !parsed.is_finite() {
+        return Err(format!("line {line_number}: `{key}` must be finite"));
+    }
+
+    Ok(parsed)
+}
+
+fn validate_blend_range(name: &str, start: f32, end: f32) -> Result<(), String> {
+    if start < 0.0 || end < 0.0 {
+        return Err(format!(
+            "`{name}_blend_start` and `{name}_blend_end` must be non-negative"
+        ));
+    }
+    if start >= end {
+        return Err(format!(
+            "`{name}_blend_start` must be less than `{name}_blend_end`"
+        ));
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    let config = AppConfig::load(CONFIG_PATH)?;
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
 
@@ -141,6 +304,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             target_format,
             window_width,
             window_height,
+            config.performance_render_scale,
         )?;
         let render_target = render_target
             .as_ref()
@@ -152,6 +316,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             &terrain_maps,
             render_target.width,
             render_target.height,
+            &config,
         );
 
         let color_targets = [ColorTargetInfo::default()
@@ -290,8 +455,8 @@ fn create_upscale_pipeline(
     Ok(pipeline)
 }
 
-fn scaled_render_dimension(window_dimension: u32) -> u32 {
-    ((window_dimension as f32 * PERFORMANCE_RENDER_SCALE).round() as u32).max(1)
+fn scaled_render_dimension(window_dimension: u32, render_scale: f32) -> u32 {
+    ((window_dimension as f32 * render_scale).round() as u32).max(1)
 }
 
 fn ensure_render_target(
@@ -300,9 +465,10 @@ fn ensure_render_target(
     format: TextureFormat,
     window_width: u32,
     window_height: u32,
+    render_scale: f32,
 ) -> Result<(), Box<dyn Error>> {
-    let width = scaled_render_dimension(window_width);
-    let height = scaled_render_dimension(window_height);
+    let width = scaled_render_dimension(window_width, render_scale);
+    let height = scaled_render_dimension(window_height, render_scale);
     let needs_recreate = match render_target {
         Some(target) => target.width != width || target.height != height,
         None => true,
@@ -570,6 +736,7 @@ fn shader_params(
     terrain_maps: &TerrainMaps,
     width: u32,
     height: u32,
+    config: &AppConfig,
 ) -> ShaderParams {
     let ray_basis = camera_ray_basis(camera, width, height);
 
@@ -594,16 +761,16 @@ fn shader_params(
             terrain_maps.height_far_size[1],
         ],
         lod_distances: [
-            HEIGHT_LOD_BLEND_START,
-            HEIGHT_LOD_BLEND_END,
-            NORMAL_DETAIL_BLEND_START,
-            NORMAL_DETAIL_BLEND_END,
+            config.height_lod_blend_start,
+            config.height_lod_blend_end,
+            config.normal_detail_blend_start,
+            config.normal_detail_blend_end,
         ],
         raymarch: [
             camera.pitch,
             RAYMARCH_START_DISTANCE,
             camera.max_distance,
-            0.0,
+            config.ray_iteration_count as f32,
         ],
         ray_forward: [
             ray_basis.forward[0],
@@ -672,5 +839,55 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
         [v[0] / length, v[1] / length, v[2] / length]
     } else {
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_config_overrides_and_keeps_defaults() {
+        let config = AppConfig::parse(
+            r#"
+            ray_iteration_count = 200
+            performance_render_scale = 0.4
+            height_lod_blend_start = 175.0
+            # normal detail values intentionally omitted
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.ray_iteration_count, 200);
+        assert_eq!(config.performance_render_scale, 0.4);
+        assert_eq!(config.height_lod_blend_start, 175.0);
+        assert_eq!(
+            config.normal_detail_blend_start,
+            DEFAULT_NORMAL_DETAIL_BLEND_START
+        );
+        assert_eq!(
+            config.normal_detail_blend_end,
+            DEFAULT_NORMAL_DETAIL_BLEND_END
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_config_ranges() {
+        let error = AppConfig::parse(
+            r#"
+            ray_iteration_count = 0
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("ray_iteration_count"));
+
+        let error = AppConfig::parse(
+            r#"
+            height_lod_blend_start = 300.0
+            height_lod_blend_end = 125.0
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("height_lod_blend_start"));
     }
 }
