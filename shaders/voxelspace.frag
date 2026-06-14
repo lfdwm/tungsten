@@ -26,6 +26,9 @@ const int HIT_REFINE_MID_STEPS = 5;
 const int HIT_REFINE_FAR_STEPS = 4;
 const float LARGE_STEP_PROBE_MIN_STEP = 2.0;
 const float LARGE_STEP_PROBE_CELL_FACTOR = 0.75;
+const float CLOSE_TERRAIN_STEP_CELL_FACTOR = 0.45;
+const float CLOSE_TERRAIN_STEP_BLEND_START = 2.0;
+const float CLOSE_TERRAIN_STEP_BLEND_END = 12.0;
 
 float height_cell(sampler2D height_map, vec2 world_pos, vec2 map_size) {
     vec2 terrain_uv = world_pos / terrain.xy;
@@ -152,9 +155,18 @@ vec3 terrain_color(vec3 hit_pos, float horizontal_dist) {
 }
 
 float raymarch_step_size(float horizontal_dist, float lod_blend) {
+    float near_cell_size = terrain.x / height_maps.x;
+    float close_step = near_cell_size * CLOSE_TERRAIN_STEP_CELL_FACTOR;
     float near_step = 0.55 + horizontal_dist * 0.0055;
+    float close_step_blend = smoothstep(
+        CLOSE_TERRAIN_STEP_BLEND_START,
+        CLOSE_TERRAIN_STEP_BLEND_END,
+        horizontal_dist
+    );
     float far_step = 1.0 + horizontal_dist * 0.0095;
-    return clamp(mix(near_step, far_step, lod_blend), 0.45, 4.0);
+    near_step = mix(close_step, near_step, close_step_blend);
+
+    return clamp(mix(near_step, far_step, lod_blend), min(close_step, 0.45), 4.0);
 }
 
 int hit_refine_steps(float horizontal_dist) {
