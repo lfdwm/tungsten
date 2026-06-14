@@ -74,6 +74,10 @@ int glyph_row_bits(int glyph, int row) {
         int rows[5] = int[](5, 1, 2, 4, 5);
         return rows[row];
     }
+    if (glyph == 16) {
+        int rows[5] = int[](5, 7, 7, 5, 5);
+        return rows[row];
+    }
 
     return 0;
 }
@@ -114,7 +118,7 @@ int fps_glyph(int char_index, int fps) {
     return -1;
 }
 
-int dt_glyph(int char_index, int render_percent) {
+int dt_glyph(int char_index, int frame_ms) {
     if (char_index == 0) {
         return 13;
     }
@@ -122,10 +126,13 @@ int dt_glyph(int char_index, int render_percent) {
         return 14;
     }
     if (char_index >= 3 && char_index <= 5) {
-        return metric_digit(render_percent, char_index - 3, 3);
+        return metric_digit(frame_ms, char_index - 3, 3);
     }
     if (char_index == 6) {
-        return 15;
+        return 16;
+    }
+    if (char_index == 7) {
+        return 12;
     }
 
     return -1;
@@ -139,7 +146,7 @@ float glyph_alpha(vec2 screen_px, vec2 origin, float scale, int value, int mode)
 
     float char_stride = scale * 4.0;
     int char_index = int(floor(local.x / char_stride));
-    int char_count = mode == 0 ? 8 : 7;
+    int char_count = 8;
     if (char_index < 0 || char_index >= char_count || local.y >= scale * 5.0) {
         return 0.0;
     }
@@ -170,9 +177,9 @@ vec3 overlay_fps(vec3 color, vec2 screen_px) {
     vec2 origin = vec2(10.0, 10.0);
     float scale = 3.0;
     float line_stride = scale * 7.0;
-    vec2 bounds = vec2(scale * 31.0, scale * 14.0);
+    vec2 bounds = vec2(scale * 33.0, scale * 14.0);
     int fps = clamp(int(overlay.x + 0.5), 0, 9999);
-    int render_percent = clamp(int(overlay.w + 0.5), 0, 999);
+    int frame_ms = clamp(int(overlay.w + 0.5), 0, 999);
 
     if (screen_px.x >= origin.x - 4.0 && screen_px.x <= origin.x + bounds.x &&
         screen_px.y >= origin.y - 4.0 && screen_px.y <= origin.y + bounds.y) {
@@ -181,13 +188,13 @@ vec3 overlay_fps(vec3 color, vec2 screen_px) {
 
     float shadow = max(
         glyph_alpha(screen_px, origin + vec2(1.0, 1.0), scale, fps, 0),
-        glyph_alpha(screen_px, origin + vec2(1.0, line_stride + 1.0), scale, render_percent, 1)
+        glyph_alpha(screen_px, origin + vec2(1.0, line_stride + 1.0), scale, frame_ms, 1)
     );
     color = mix(color, vec3(0.0), shadow * 0.85);
 
     float text = max(
         glyph_alpha(screen_px, origin, scale, fps, 0),
-        glyph_alpha(screen_px, origin + vec2(0.0, line_stride), scale, render_percent, 1)
+        glyph_alpha(screen_px, origin + vec2(0.0, line_stride), scale, frame_ms, 1)
     );
     return mix(color, vec3(0.90, 1.0, 0.82), text);
 }

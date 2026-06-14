@@ -9,10 +9,10 @@ use sdl3::{
     event::Event,
     gpu::{
         ColorTargetDescription, ColorTargetInfo, Device, FillMode, Filter, GraphicsPipeline,
-        GraphicsPipelineTargetInfo, LoadOp, PrimitiveType, Sampler, SamplerAddressMode,
-        SamplerCreateInfo, SamplerMipmapMode, ShaderFormat, ShaderStage, StoreOp, Texture,
-        TextureCreateInfo, TextureFormat, TextureRegion, TextureSamplerBinding,
-        TextureTransferInfo, TextureType, TextureUsage, TransferBufferUsage,
+        GraphicsPipelineTargetInfo, LoadOp, PresentMode, PrimitiveType, Sampler,
+        SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode, ShaderFormat, ShaderStage,
+        StoreOp, SwapchainComposition, Texture, TextureCreateInfo, TextureFormat, TextureRegion,
+        TextureSamplerBinding, TextureTransferInfo, TextureType, TextureUsage, TransferBufferUsage,
     },
     keyboard::{Keycode, Scancode},
     pixels::Color,
@@ -43,6 +43,7 @@ const DEFAULT_HEIGHT_LOD_BLEND_END: f32 = 300.0;
 const DEFAULT_NORMAL_DETAIL_BLEND_START: f32 = 500.0;
 const DEFAULT_NORMAL_DETAIL_BLEND_END: f32 = 1000.0;
 const DEFAULT_PERFORMANCE_RENDER_SCALE: f32 = 0.5;
+const DEFAULT_PRESENT_MODE: AppPresentMode = AppPresentMode::Vsync;
 const PLAYER_EYE_HEIGHT: f32 = 1.0;
 const PLAYER_MOVE_SPEED: f32 = 5.0;
 const PLAYER_MIN_EYE_HEIGHT: f32 = 1.0;
@@ -195,34 +196,30 @@ impl PlayerPhysics {
 
 struct FpsCounter {
     accumulated: Duration,
-    render_accumulated: Duration,
     frame_count: u32,
     displayed_fps: f32,
-    displayed_render_percent: f32,
+    displayed_frame_ms: f32,
 }
 
 impl FpsCounter {
     fn new() -> Self {
         Self {
             accumulated: Duration::ZERO,
-            render_accumulated: Duration::ZERO,
             frame_count: 0,
             displayed_fps: 0.0,
-            displayed_render_percent: 0.0,
+            displayed_frame_ms: 0.0,
         }
     }
 
-    fn update(&mut self, frame_duration: Duration, render_duration: Duration) {
+    fn update(&mut self, frame_duration: Duration) {
         self.accumulated += frame_duration;
-        self.render_accumulated += render_duration;
         self.frame_count += 1;
 
         if self.accumulated >= Duration::from_millis(250) {
             self.displayed_fps = self.frame_count as f32 / self.accumulated.as_secs_f32();
-            self.displayed_render_percent =
-                self.render_accumulated.as_secs_f32() / self.accumulated.as_secs_f32() * 100.0;
+            self.displayed_frame_ms =
+                self.accumulated.as_secs_f32() * 1000.0 / self.frame_count as f32;
             self.accumulated = Duration::ZERO;
-            self.render_accumulated = Duration::ZERO;
             self.frame_count = 0;
         }
     }
@@ -232,6 +229,7 @@ impl FpsCounter {
 struct AppConfig {
     ray_iteration_count: u32,
     performance_render_scale: f32,
+    present_mode: AppPresentMode,
     start_x: f32,
     start_y: f32,
     start_height: f32,
@@ -241,11 +239,37 @@ struct AppConfig {
     height_lod_blend_end: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppPresentMode {
+    Vsync,
+    Immediate,
+    Mailbox,
+}
+
+impl AppPresentMode {
+    fn to_sdl(self) -> PresentMode {
+        match self {
+            Self::Vsync => PresentMode::Vsync,
+            Self::Immediate => PresentMode::Immediate,
+            Self::Mailbox => PresentMode::Mailbox,
+        }
+    }
+
+    fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Vsync => "vsync",
+            Self::Immediate => "immediate",
+            Self::Mailbox => "mailbox",
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             ray_iteration_count: DEFAULT_RAY_ITERATION_COUNT,
             performance_render_scale: DEFAULT_PERFORMANCE_RENDER_SCALE,
+            present_mode: DEFAULT_PRESENT_MODE,
             start_x: DEFAULT_START_X,
             start_y: DEFAULT_START_Y,
             start_height: DEFAULT_START_HEIGHT,
@@ -311,6 +335,9 @@ impl AppConfig {
                 }
                 "performance_render_scale" => {
                     config.performance_render_scale = parse_config_f32(key, value, line_number)?
+                }
+                "present_mode" => {
+                    config.present_mode = parse_present_mode_config(value, line_number)?
                 }
                 "start_x" => config.start_x = parse_config_f32(key, value, line_number)?,
                 "start_y" => config.start_y = parse_config_f32(key, value, line_number)?,
@@ -384,6 +411,45 @@ fn parse_config_f32(key: &str, value: &str, line_number: usize) -> Result<f32, S
     Ok(parsed)
 }
 
+fn parse_present_mode_config(value: &str, line_number: usize) -> Result<AppPresentMode, String> {
+    let value = parse_config_string("present_mode", value, line_number)?;
+
+    match value.to_ascii_lowercase().as_str() {
+        "vsync" | "v-sync" => Ok(AppPresentMode::Vsync),
+        "immediate" => Ok(AppPresentMode::Immediate),
+        "mailbox" => Ok(AppPresentMode::Mailbox),
+        _ => Err(format!(
+            "line {line_number}: `present_mode` must be one of `vsync`, `immediate`, or `mailbox`"
+        )),
+    }
+}
+
+fn parse_config_string<'a>(
+    key: &str,
+    value: &'a str,
+    line_number: usize,
+) -> Result<&'a str, String> {
+    let value = value.trim();
+    let unquoted = if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+        {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        }
+    } else {
+        value
+    };
+
+    if unquoted.is_empty() {
+        return Err(format!("line {line_number}: `{key}` must not be empty"));
+    }
+
+    Ok(unquoted)
+}
+
 fn validate_blend_range(name: &str, start: f32, end: f32) -> Result<(), String> {
     if start < 0.0 || end < 0.0 {
         return Err(format!(
@@ -411,6 +477,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build()?;
 
     let gpu = Device::new(ShaderFormat::SPIRV, cfg!(debug_assertions))?.with_window(&window)?;
+    gpu.set_swapchain_parameters(
+        &window,
+        config.present_mode.to_sdl(),
+        SwapchainComposition::Sdr,
+    )
+    .map_err(|error| {
+        format!(
+            "failed to set `{}` present mode: {error}",
+            config.present_mode.as_config_value()
+        )
+    })?;
     let target_format = gpu.get_swapchain_texture_format(&window);
     let terrain_pipeline = create_terrain_pipeline(&gpu, target_format)?;
     let upscale_pipeline = create_upscale_pipeline(&gpu, target_format)?;
@@ -514,7 +591,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             ),
         }
 
-        let render_phase_start = Instant::now();
         let (window_width, window_height) = window.size();
         ensure_render_target(
             &gpu,
@@ -589,7 +665,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             command_buffer.cancel();
         }
 
-        fps_counter.update(frame_duration, render_phase_start.elapsed());
+        fps_counter.update(frame_duration);
     }
 
     Ok(())
@@ -685,7 +761,7 @@ fn upscale_params(fps_counter: &FpsCounter, width: u32, height: u32) -> UpscaleP
             fps_counter.displayed_fps,
             width as f32,
             height as f32,
-            fps_counter.displayed_render_percent,
+            fps_counter.displayed_frame_ms,
         ],
     }
 }
@@ -1269,6 +1345,7 @@ mod tests {
             r#"
             ray_iteration_count = 200
             performance_render_scale = 0.4
+            present_mode = "mailbox"
             start_x = 123.0
             start_y = 456.0
             start_height = 78.0
@@ -1280,6 +1357,7 @@ mod tests {
 
         assert_eq!(config.ray_iteration_count, 200);
         assert_eq!(config.performance_render_scale, 0.4);
+        assert_eq!(config.present_mode, AppPresentMode::Mailbox);
         assert_eq!(config.start_x, 123.0);
         assert_eq!(config.start_y, 456.0);
         assert_eq!(config.start_height, 78.0);
@@ -1291,6 +1369,28 @@ mod tests {
         assert_eq!(
             config.normal_detail_blend_end,
             DEFAULT_NORMAL_DETAIL_BLEND_END
+        );
+    }
+
+    #[test]
+    fn parses_present_mode_values() {
+        assert_eq!(
+            AppConfig::parse("present_mode = vsync")
+                .unwrap()
+                .present_mode,
+            AppPresentMode::Vsync
+        );
+        assert_eq!(
+            AppConfig::parse("present_mode = 'immediate'")
+                .unwrap()
+                .present_mode,
+            AppPresentMode::Immediate
+        );
+        assert_eq!(
+            AppConfig::parse("present_mode = \"mailbox\"")
+                .unwrap()
+                .present_mode,
+            AppPresentMode::Mailbox
         );
     }
 
@@ -1320,6 +1420,14 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("start_height"));
+
+        let error = AppConfig::parse(
+            r#"
+            present_mode = "triple"
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("present_mode"));
     }
 
     #[test]

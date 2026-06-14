@@ -2,6 +2,7 @@
 # ray_iteration_count = 700
 ray_iteration_count = 1000
 performance_render_scale = 0.5
+present_mode = "immediate"
 
 start_x = 1900.0
 start_y = 4460.0
