@@ -24,6 +24,8 @@ const int MAX_RAY_ITERATIONS = 4096;
 const int HIT_REFINE_NEAR_STEPS = 6;
 const int HIT_REFINE_MID_STEPS = 5;
 const int HIT_REFINE_FAR_STEPS = 4;
+const float LARGE_STEP_PROBE_MIN_STEP = 2.0;
+const float LARGE_STEP_PROBE_CELL_FACTOR = 0.75;
 
 float height_cell(sampler2D height_map, vec2 world_pos, vec2 map_size) {
     vec2 terrain_uv = world_pos / terrain.xy;
@@ -227,6 +229,15 @@ bool probe_large_step(
     return false;
 }
 
+bool should_probe_large_step(float horizontal_step, float lod_blend, float previous_delta) {
+    float probe_threshold = max(
+        LARGE_STEP_PROBE_MIN_STEP,
+        height_sample_radius(lod_blend) * LARGE_STEP_PROBE_CELL_FACTOR
+    );
+
+    return horizontal_step > probe_threshold && previous_delta < render.w * 0.55;
+}
+
 bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dist, out float hit_horizontal_dist) {
     float bounds_enter_t;
     float bounds_exit_t;
@@ -257,25 +268,33 @@ bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dis
 
     for (int i = 0; i < iteration_count; i++) {
         float step_size = raymarch_step_size(previous_horizontal, previous_lod_blend);
-        float t = previous_t + step_size / ray_horizontal;
+        float target_t = previous_t + step_size / ray_horizontal;
+        bool reached_max_t = target_t >= max_t;
+        float t = min(target_t, max_t);
 
-        if (t > max_t) {
+        if (t <= previous_t) {
             break;
         }
 
-        if (step_size > 10.0 && previous_delta < render.w * 0.55) {
+        float horizontal = t * ray_horizontal;
+        float horizontal_step = horizontal - previous_horizontal;
+
+        if (should_probe_large_step(horizontal_step, previous_lod_blend, previous_delta)) {
             if (probe_large_step(origin, ray, ray_horizontal, previous_t, t, hit_pos, hit_dist, hit_horizontal_dist)) {
                 return true;
             }
         }
 
         vec3 point = origin + ray * t;
-        float horizontal = t * ray_horizontal;
         float lod_blend = height_lod_blend(horizontal);
         float delta = terrain_delta(point, lod_blend);
 
         if (delta <= 0.0) {
             return refine_terrain_hit(origin, ray, ray_horizontal, previous_t, t, hit_pos, hit_dist, hit_horizontal_dist);
+        }
+
+        if (reached_max_t) {
+            break;
         }
 
         previous_t = t;
