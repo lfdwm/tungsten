@@ -29,12 +29,22 @@ const float LARGE_STEP_PROBE_CELL_FACTOR = 0.75;
 const float CLOSE_TERRAIN_STEP_CELL_FACTOR = 0.45;
 const float CLOSE_TERRAIN_STEP_BLEND_START = 2.0;
 const float CLOSE_TERRAIN_STEP_BLEND_END = 12.0;
+const float NEAR_DDA_DISTANCE = 512.0;
+const int NEAR_DDA_MAX_STEPS = 1024;
+const float NEAR_DDA_AXIS_EPSILON = 0.00001;
+const float NEAR_DDA_T_EPSILON = 0.00001;
 
 float height_cell(sampler2D height_map, vec2 world_pos, vec2 map_size) {
     vec2 terrain_uv = world_pos / terrain.xy;
     ivec2 size = ivec2(map_size);
     ivec2 cell = clamp(ivec2(floor(terrain_uv * map_size)), ivec2(0), size - ivec2(1));
     return texelFetch(height_map, cell, 0).r * render.w;
+}
+
+float height_near_cell(ivec2 cell) {
+    ivec2 size = ivec2(height_maps.xy);
+    ivec2 clamped_cell = clamp(cell, ivec2(0), size - ivec2(1));
+    return texelFetch(height_near_map, clamped_cell, 0).r * render.w;
 }
 
 float height_lod_blend(float horizontal_dist) {
@@ -250,6 +260,120 @@ bool should_probe_large_step(float horizontal_step, float lod_blend, float previ
     return horizontal_step > probe_threshold && previous_delta < render.w * 0.55;
 }
 
+bool near_cell_in_bounds(ivec2 cell) {
+    ivec2 size = ivec2(height_maps.xy);
+    return cell.x >= 0 && cell.y >= 0 && cell.x < size.x && cell.y < size.y;
+}
+
+void set_terrain_hit(
+    vec3 origin,
+    vec3 ray,
+    float ray_horizontal,
+    float t,
+    out vec3 hit_pos,
+    out float hit_dist,
+    out float hit_horizontal_dist
+) {
+    hit_dist = t;
+    hit_pos = origin + ray * hit_dist;
+    hit_horizontal_dist = hit_dist * ray_horizontal;
+}
+
+bool raycast_near_height_cells(
+    vec3 origin,
+    vec3 ray,
+    float ray_horizontal,
+    float start_t,
+    float max_t,
+    out float exit_t,
+    out vec3 hit_pos,
+    out float hit_dist,
+    out float hit_horizontal_dist
+) {
+    float dda_end_t = min(max_t, NEAR_DDA_DISTANCE / ray_horizontal);
+    exit_t = start_t;
+
+    if (start_t >= dda_end_t) {
+        return false;
+    }
+
+    vec2 cell_size = terrain.xy / height_maps.xy;
+    vec2 start_pos = origin.xz + ray.xz * (start_t + NEAR_DDA_T_EPSILON);
+    ivec2 cell = ivec2(floor(start_pos / cell_size));
+
+    if (!near_cell_in_bounds(cell)) {
+        return false;
+    }
+
+    ivec2 step_cell = ivec2(
+        ray.x > 0.0 ? 1 : (ray.x < 0.0 ? -1 : 0),
+        ray.z > 0.0 ? 1 : (ray.z < 0.0 ? -1 : 0)
+    );
+    float next_boundary_x = (float(cell.x) + (step_cell.x > 0 ? 1.0 : 0.0)) * cell_size.x;
+    float next_boundary_z = (float(cell.y) + (step_cell.y > 0 ? 1.0 : 0.0)) * cell_size.y;
+    float next_x_t = step_cell.x == 0 ? 1.0e30 : (next_boundary_x - origin.x) / ray.x;
+    float next_z_t = step_cell.y == 0 ? 1.0e30 : (next_boundary_z - origin.z) / ray.z;
+    float delta_x_t = step_cell.x == 0 ? 1.0e30 : cell_size.x / abs(ray.x);
+    float delta_z_t = step_cell.y == 0 ? 1.0e30 : cell_size.y / abs(ray.z);
+    float current_t = start_t;
+    float current_height = height_near_cell(cell);
+
+    for (int i = 0; i < NEAR_DDA_MAX_STEPS; i++) {
+        float current_y = origin.y + ray.y * current_t;
+        if (current_y <= current_height) {
+            set_terrain_hit(origin, ray, ray_horizontal, current_t, hit_pos, hit_dist, hit_horizontal_dist);
+            return true;
+        }
+
+        float next_t = min(min(next_x_t, next_z_t), dda_end_t);
+
+        if (ray.y < -NEAR_DDA_AXIS_EPSILON) {
+            float top_t = (current_height - origin.y) / ray.y;
+            if (top_t >= current_t - NEAR_DDA_T_EPSILON && top_t <= next_t + NEAR_DDA_T_EPSILON) {
+                set_terrain_hit(origin, ray, ray_horizontal, max(top_t, current_t), hit_pos, hit_dist, hit_horizontal_dist);
+                return true;
+            }
+        }
+
+        if (next_t >= dda_end_t) {
+            exit_t = dda_end_t;
+            return false;
+        }
+
+        bool cross_x = next_x_t <= next_t + NEAR_DDA_T_EPSILON;
+        bool cross_z = next_z_t <= next_t + NEAR_DDA_T_EPSILON;
+        ivec2 next_cell = cell;
+        if (cross_x) {
+            next_cell.x += step_cell.x;
+            next_x_t += delta_x_t;
+        }
+        if (cross_z) {
+            next_cell.y += step_cell.y;
+            next_z_t += delta_z_t;
+        }
+
+        if (!near_cell_in_bounds(next_cell)) {
+            exit_t = next_t;
+            return false;
+        }
+
+        float boundary_y = origin.y + ray.y * next_t;
+        float next_height = height_near_cell(next_cell);
+        float side_height = max(current_height, next_height);
+        if (boundary_y <= side_height) {
+            set_terrain_hit(origin, ray, ray_horizontal, next_t, hit_pos, hit_dist, hit_horizontal_dist);
+            return true;
+        }
+
+        cell = next_cell;
+        current_height = next_height;
+        current_t = next_t;
+    }
+
+    exit_t = current_t;
+    return false;
+}
+
 bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dist, out float hit_horizontal_dist) {
     float bounds_enter_t;
     float bounds_exit_t;
@@ -266,6 +390,27 @@ bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dis
     if (previous_t > max_t) {
         return false;
     }
+
+    float near_cell_exit_t;
+    if (raycast_near_height_cells(
+        origin,
+        ray,
+        ray_horizontal,
+        previous_t,
+        max_t,
+        near_cell_exit_t,
+        hit_pos,
+        hit_dist,
+        hit_horizontal_dist
+    )) {
+        return true;
+    }
+
+    if (near_cell_exit_t >= max_t) {
+        return false;
+    }
+
+    previous_t = max(previous_t, near_cell_exit_t);
 
     float previous_horizontal = previous_t * ray_horizontal;
     float previous_lod_blend = height_lod_blend(previous_horizontal);
