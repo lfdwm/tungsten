@@ -68,6 +68,12 @@ struct ShaderParams {
     ray_up: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UpscaleParams {
+    overlay: [f32; 4],
+}
+
 struct Camera {
     x: f32,
     y: f32,
@@ -181,6 +187,41 @@ impl PlayerPhysics {
             on_ground: false,
             eye_height: PLAYER_EYE_HEIGHT,
             move_speed: PLAYER_MOVE_SPEED,
+        }
+    }
+}
+
+struct FpsCounter {
+    accumulated: Duration,
+    render_accumulated: Duration,
+    frame_count: u32,
+    displayed_fps: f32,
+    displayed_render_percent: f32,
+}
+
+impl FpsCounter {
+    fn new() -> Self {
+        Self {
+            accumulated: Duration::ZERO,
+            render_accumulated: Duration::ZERO,
+            frame_count: 0,
+            displayed_fps: 0.0,
+            displayed_render_percent: 0.0,
+        }
+    }
+
+    fn update(&mut self, frame_duration: Duration, render_duration: Duration) {
+        self.accumulated += frame_duration;
+        self.render_accumulated += render_duration;
+        self.frame_count += 1;
+
+        if self.accumulated >= Duration::from_millis(250) {
+            self.displayed_fps = self.frame_count as f32 / self.accumulated.as_secs_f32();
+            self.displayed_render_percent =
+                self.render_accumulated.as_secs_f32() / self.accumulated.as_secs_f32() * 100.0;
+            self.accumulated = Duration::ZERO;
+            self.render_accumulated = Duration::ZERO;
+            self.frame_count = 0;
         }
     }
 }
@@ -389,6 +430,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let mut camera_mode = CameraMode::Freecam;
     let mut player_physics = PlayerPhysics::new();
+    let mut fps_counter = FpsCounter::new();
 
     let mut events = sdl.event_pump()?;
     let mut previous_frame = Instant::now();
@@ -440,7 +482,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         let now = Instant::now();
-        let dt = (now - previous_frame).min(Duration::from_millis(50));
+        let frame_duration = now - previous_frame;
+        let dt = frame_duration.min(Duration::from_millis(50));
         previous_frame = now;
         if camera_mode == CameraMode::Gravity && wheel_delta != 0.0 {
             let keyboard = events.keyboard_state();
@@ -469,6 +512,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             ),
         }
 
+        let render_phase_start = Instant::now();
         let (window_width, window_height) = window.size();
         ensure_render_target(
             &gpu,
@@ -518,6 +562,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         gpu.end_render_pass(render_pass);
 
         if let Ok(swapchain) = command_buffer.wait_and_acquire_swapchain_texture(&window) {
+            let upscale_params =
+                upscale_params(&fps_counter, swapchain.width(), swapchain.height());
             let color_targets = [ColorTargetInfo::default()
                 .with_texture(&swapchain)
                 .with_load_op(LoadOp::CLEAR)
@@ -532,6 +578,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .with_texture(&render_target.texture)
                     .with_sampler(&upscale_sampler)],
             );
+            command_buffer.push_fragment_uniform_data(0, &upscale_params);
             upscale_pass.draw_primitives(3, 1, 0, 0);
             gpu.end_render_pass(upscale_pass);
 
@@ -539,6 +586,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             command_buffer.cancel();
         }
+
+        fps_counter.update(frame_duration, render_phase_start.elapsed());
     }
 
     Ok(())
@@ -608,6 +657,7 @@ fn create_upscale_pipeline(
             ShaderStage::Fragment,
         )
         .with_samplers(1)
+        .with_uniform_buffers(1)
         .with_entrypoint(c"main")
         .build()?;
 
@@ -625,6 +675,17 @@ fn create_upscale_pipeline(
         .build()?;
 
     Ok(pipeline)
+}
+
+fn upscale_params(fps_counter: &FpsCounter, width: u32, height: u32) -> UpscaleParams {
+    UpscaleParams {
+        overlay: [
+            fps_counter.displayed_fps,
+            width as f32,
+            height as f32,
+            fps_counter.displayed_render_percent,
+        ],
+    }
 }
 
 fn scaled_render_dimension(window_dimension: u32, render_scale: f32) -> u32 {
