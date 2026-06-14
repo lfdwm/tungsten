@@ -28,9 +28,12 @@ const HEIGHT_MAP_NEAR_WIDTH: u32 = 8192;
 const HEIGHT_MAP_NEAR_HEIGHT: u32 = 8192;
 const HEIGHT_MAP_FAR_WIDTH: u32 = 1024;
 const HEIGHT_MAP_FAR_HEIGHT: u32 = 1024;
-const TERRAIN_HORIZONTAL_SCALE: f32 = 0.5;
-const HEIGHT_SCALE: f32 = 255.0 * 1.7;
 const RAYMARCH_START_DISTANCE: f32 = 1.0;
+const TERRAIN_HEIGHT_SCALE: f32 = 255.0 * 2.1;
+const TERRAIN_HORIZONTAL_SCALE: f32 = 1.0;
+const DEFAULT_START_X: f32 = 250.0;
+const DEFAULT_START_Y: f32 = 330.0;
+const DEFAULT_START_HEIGHT: f32 = 150.0;
 const DEFAULT_RAY_ITERATION_COUNT: u32 = 700;
 const MAX_RAY_ITERATION_COUNT: u32 = 4096;
 const DEFAULT_HEIGHT_LOD_BLEND_START: f32 = 125.0;
@@ -38,6 +41,18 @@ const DEFAULT_HEIGHT_LOD_BLEND_END: f32 = 300.0;
 const DEFAULT_NORMAL_DETAIL_BLEND_START: f32 = 500.0;
 const DEFAULT_NORMAL_DETAIL_BLEND_END: f32 = 1000.0;
 const DEFAULT_PERFORMANCE_RENDER_SCALE: f32 = 0.5;
+const PLAYER_EYE_HEIGHT: f32 = 1.0;
+const PLAYER_MOVE_SPEED: f32 = 5.0;
+const PLAYER_MIN_EYE_HEIGHT: f32 = 1.0;
+const PLAYER_MAX_EYE_HEIGHT: f32 = 120.0;
+const PLAYER_EYE_HEIGHT_SCROLL_STEP: f32 = 0.5;
+const PLAYER_MIN_MOVE_SPEED: f32 = 5.0;
+const PLAYER_MAX_MOVE_SPEED: f32 = 500.0;
+const PLAYER_MOVE_SPEED_SCROLL_STEP: f32 = 1.0;
+const PLAYER_GRAVITY: f32 = 240.0;
+const PLAYER_JUMP_SPEED: f32 = 105.0;
+const PLAYER_MAX_FALL_SPEED: f32 = 260.0;
+const PLAYER_GROUND_SNAP: f32 = 8.0;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -73,6 +88,7 @@ struct TerrainMaps {
     color_size: [f32; 2],
     height_near_size: [f32; 2],
     height_far_size: [f32; 2],
+    collision_height: HeightField,
 }
 
 struct RenderTarget {
@@ -81,10 +97,101 @@ struct RenderTarget {
     height: u32,
 }
 
+struct HeightField {
+    samples: Vec<u16>,
+    width: u32,
+    height: u32,
+    terrain_size: [f32; 2],
+}
+
+impl HeightField {
+    fn from_r16_bytes(
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+        terrain_size: [f32; 2],
+    ) -> Result<Self, Box<dyn Error>> {
+        let expected_size = width as usize * height as usize * 2;
+        if bytes.len() != expected_size {
+            return Err(format!(
+                "R16 height field has {} bytes, expected {expected_size} for {width}x{height}",
+                bytes.len()
+            )
+            .into());
+        }
+
+        let samples = bytes
+            .chunks_exact(2)
+            .map(|sample| u16::from_le_bytes([sample[0], sample[1]]))
+            .collect();
+
+        Ok(Self {
+            samples,
+            width,
+            height,
+            terrain_size,
+        })
+    }
+
+    fn height_at(&self, world_x: f32, world_y: f32) -> f32 {
+        let sample_x = (world_x / self.terrain_size[0] * self.width as f32)
+            .clamp(0.0, (self.width - 1) as f32);
+        let sample_y = (world_y / self.terrain_size[1] * self.height as f32)
+            .clamp(0.0, (self.height - 1) as f32);
+        let x0 = sample_x.floor() as u32;
+        let y0 = sample_y.floor() as u32;
+        let x1 = (x0 + 1).min(self.width - 1);
+        let y1 = (y0 + 1).min(self.height - 1);
+        let tx = sample_x - x0 as f32;
+        let ty = sample_y - y0 as f32;
+
+        let h00 = self.sample_height(x0, y0);
+        let h10 = self.sample_height(x1, y0);
+        let h01 = self.sample_height(x0, y1);
+        let h11 = self.sample_height(x1, y1);
+        let h0 = h00 + (h10 - h00) * tx;
+        let h1 = h01 + (h11 - h01) * tx;
+
+        h0 + (h1 - h0) * ty
+    }
+
+    fn sample_height(&self, x: u32, y: u32) -> f32 {
+        let index = y as usize * self.width as usize + x as usize;
+        self.samples[index] as f32 / u16::MAX as f32 * TERRAIN_HEIGHT_SCALE
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CameraMode {
+    Freecam,
+    Gravity,
+}
+
+struct PlayerPhysics {
+    vertical_velocity: f32,
+    on_ground: bool,
+    eye_height: f32,
+    move_speed: f32,
+}
+
+impl PlayerPhysics {
+    fn new() -> Self {
+        Self {
+            vertical_velocity: 0.0,
+            on_ground: false,
+            eye_height: PLAYER_EYE_HEIGHT,
+            move_speed: PLAYER_MOVE_SPEED,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct AppConfig {
     ray_iteration_count: u32,
     performance_render_scale: f32,
+    start_x: f32,
+    start_y: f32,
+    start_height: f32,
     normal_detail_blend_start: f32,
     normal_detail_blend_end: f32,
     height_lod_blend_start: f32,
@@ -96,6 +203,9 @@ impl Default for AppConfig {
         Self {
             ray_iteration_count: DEFAULT_RAY_ITERATION_COUNT,
             performance_render_scale: DEFAULT_PERFORMANCE_RENDER_SCALE,
+            start_x: DEFAULT_START_X,
+            start_y: DEFAULT_START_Y,
+            start_height: DEFAULT_START_HEIGHT,
             normal_detail_blend_start: DEFAULT_NORMAL_DETAIL_BLEND_START,
             normal_detail_blend_end: DEFAULT_NORMAL_DETAIL_BLEND_END,
             height_lod_blend_start: DEFAULT_HEIGHT_LOD_BLEND_START,
@@ -159,6 +269,9 @@ impl AppConfig {
                 "performance_render_scale" => {
                     config.performance_render_scale = parse_config_f32(key, value, line_number)?
                 }
+                "start_x" => config.start_x = parse_config_f32(key, value, line_number)?,
+                "start_y" => config.start_y = parse_config_f32(key, value, line_number)?,
+                "start_height" => config.start_height = parse_config_f32(key, value, line_number)?,
                 "normal_detail_blend_start" => {
                     config.normal_detail_blend_start = parse_config_f32(key, value, line_number)?
                 }
@@ -189,6 +302,9 @@ impl AppConfig {
                 "`performance_render_scale` must be greater than 0.0 and no more than 1.0"
                     .to_owned(),
             );
+        }
+        if self.start_x < 0.0 || self.start_y < 0.0 || self.start_height < 0.0 {
+            return Err("`start_x`, `start_y`, and `start_height` must be non-negative".to_owned());
         }
         validate_blend_range(
             "height_lod",
@@ -263,20 +379,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     mouse.show_cursor(false);
 
     let mut camera = Camera {
-        x: 250.0,
-        y: 330.0,
-        height: 150.0,
+        x: config.start_x,
+        y: config.start_y,
+        height: config.start_height,
         yaw: 0.4,
         pitch: -0.08,
         vertical_fov: 1.05,
         max_distance: 3000.0,
     };
+    let mut camera_mode = CameraMode::Freecam;
+    let mut player_physics = PlayerPhysics::new();
 
     let mut events = sdl.event_pump()?;
     let mut previous_frame = Instant::now();
 
     'running: loop {
         let mut mouse_delta = [0.0, 0.0];
+        let mut wheel_delta = 0.0;
+        let mut jump_requested = false;
         for event in events.poll_iter() {
             match event {
                 Event::Quit { .. }
@@ -288,6 +408,33 @@ fn main() -> Result<(), Box<dyn Error>> {
                     mouse_delta[0] += xrel;
                     mouse_delta[1] += yrel;
                 }
+                Event::MouseWheel { y, .. } => {
+                    wheel_delta += y;
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::G),
+                    repeat: false,
+                    ..
+                } => {
+                    camera_mode = match camera_mode {
+                        CameraMode::Freecam => {
+                            enable_gravity_mode(
+                                &mut camera,
+                                &mut player_physics,
+                                &terrain_maps.collision_height,
+                            );
+                            CameraMode::Gravity
+                        }
+                        CameraMode::Gravity => CameraMode::Freecam,
+                    };
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Space),
+                    repeat: false,
+                    ..
+                } => {
+                    jump_requested = true;
+                }
                 _ => {}
             }
         }
@@ -295,7 +442,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         let now = Instant::now();
         let dt = (now - previous_frame).min(Duration::from_millis(50));
         previous_frame = now;
-        update_camera(&events, &mut camera, dt.as_secs_f32(), mouse_delta);
+        if camera_mode == CameraMode::Gravity && wheel_delta != 0.0 {
+            let keyboard = events.keyboard_state();
+            let adjust_move_speed = keyboard.is_scancode_pressed(Scancode::LShift)
+                || keyboard.is_scancode_pressed(Scancode::RShift);
+            apply_gravity_wheel_adjustment(
+                &mut camera,
+                &mut player_physics,
+                &terrain_maps.collision_height,
+                wheel_delta,
+                adjust_move_speed,
+            );
+        }
+        match camera_mode {
+            CameraMode::Freecam => {
+                update_freecam(&events, &mut camera, dt.as_secs_f32(), mouse_delta)
+            }
+            CameraMode::Gravity => update_gravity_camera(
+                &events,
+                &mut camera,
+                &mut player_physics,
+                &terrain_maps.collision_height,
+                dt.as_secs_f32(),
+                mouse_delta,
+                jump_requested,
+            ),
+        }
 
         let (window_width, window_height) = window.size();
         ensure_render_target(
@@ -530,12 +702,24 @@ fn load_terrain_maps(gpu: &Device) -> Result<TerrainMaps, Box<dyn Error>> {
 
     let color =
         create_texture_from_rgba8(gpu, &copy_pass, color_image, TextureFormat::R8g8b8a8Unorm)?;
-    let height_near = create_texture_from_r16(
-        gpu,
-        &copy_pass,
+    let height_near_pixels = read_r16_pixels(
         HEIGHT_MAP_NEAR_PATH,
         HEIGHT_MAP_NEAR_WIDTH,
         HEIGHT_MAP_NEAR_HEIGHT,
+    )?;
+    let collision_height = HeightField::from_r16_bytes(
+        &height_near_pixels,
+        HEIGHT_MAP_NEAR_WIDTH,
+        HEIGHT_MAP_NEAR_HEIGHT,
+        terrain_size,
+    )?;
+    let height_near = create_texture_from_bytes(
+        gpu,
+        &copy_pass,
+        HEIGHT_MAP_NEAR_WIDTH,
+        HEIGHT_MAP_NEAR_HEIGHT,
+        TextureFormat::R16Unorm,
+        &height_near_pixels,
     )?;
     let height_far = create_texture_from_r16(
         gpu,
@@ -576,6 +760,7 @@ fn load_terrain_maps(gpu: &Device) -> Result<TerrainMaps, Box<dyn Error>> {
         color_size,
         height_near_size,
         height_far_size,
+        collision_height,
     })
 }
 
@@ -598,6 +783,18 @@ fn create_texture_from_r16(
     width: u32,
     height: u32,
 ) -> Result<Texture<'static>, Box<dyn Error>> {
+    let pixels = read_r16_pixels(path, width, height)?;
+    create_texture_from_bytes(
+        gpu,
+        copy_pass,
+        width,
+        height,
+        TextureFormat::R16Unorm,
+        &pixels,
+    )
+}
+
+fn read_r16_pixels(path: &str, width: u32, height: u32) -> Result<Vec<u8>, Box<dyn Error>> {
     let pixels = fs::read(path)?;
     let expected_size = width as usize * height as usize * 2;
     if pixels.len() != expected_size {
@@ -608,14 +805,7 @@ fn create_texture_from_r16(
         .into());
     }
 
-    create_texture_from_bytes(
-        gpu,
-        copy_pass,
-        width,
-        height,
-        TextureFormat::R16Unorm,
-        &pixels,
-    )
+    Ok(pixels)
 }
 
 fn create_texture_from_bytes(
@@ -667,13 +857,16 @@ fn create_texture_from_bytes(
     Ok(texture)
 }
 
-fn update_camera(events: &sdl3::EventPump, camera: &mut Camera, dt: f32, mouse_delta: [f32; 2]) {
+fn update_camera_look(
+    events: &sdl3::EventPump,
+    camera: &mut Camera,
+    dt: f32,
+    mouse_delta: [f32; 2],
+) {
     let keyboard = events.keyboard_state();
     let turn_speed = 1.85;
     let pitch_speed = 1.35;
     let mouse_sensitivity = 0.0024;
-    let move_speed = 135.0;
-    let height_speed = 80.0;
 
     camera.yaw += mouse_delta[0] * mouse_sensitivity;
     camera.pitch -= mouse_delta[1] * mouse_sensitivity;
@@ -690,6 +883,16 @@ fn update_camera(events: &sdl3::EventPump, camera: &mut Camera, dt: f32, mouse_d
     if keyboard.is_scancode_pressed(Scancode::Down) {
         camera.pitch -= pitch_speed * dt;
     }
+
+    camera.pitch = camera.pitch.clamp(-1.45, 1.45);
+}
+
+fn update_freecam(events: &sdl3::EventPump, camera: &mut Camera, dt: f32, mouse_delta: [f32; 2]) {
+    update_camera_look(events, camera, dt, mouse_delta);
+
+    let keyboard = events.keyboard_state();
+    let move_speed = 135.0;
+    let height_speed = 80.0;
 
     let forward = [camera.yaw.sin(), -camera.yaw.cos()];
     let right = [camera.yaw.cos(), camera.yaw.sin()];
@@ -726,9 +929,160 @@ fn update_camera(events: &sdl3::EventPump, camera: &mut Camera, dt: f32, mouse_d
     }
 
     camera.height = camera.height.clamp(20.0, 520.0);
-    camera.pitch = camera.pitch.clamp(-1.45, 1.45);
     camera.vertical_fov = camera.vertical_fov.clamp(0.5, 1.4);
     camera.max_distance = camera.max_distance.clamp(120.0, 4096.0);
+}
+
+fn enable_gravity_mode(
+    camera: &mut Camera,
+    physics: &mut PlayerPhysics,
+    collision_height: &HeightField,
+) {
+    let ground_height = player_ground_height(camera, physics, collision_height);
+    if camera.height < ground_height {
+        camera.height = ground_height;
+    }
+    physics.vertical_velocity = 0.0;
+    physics.on_ground = camera.height <= ground_height + PLAYER_GROUND_SNAP;
+}
+
+fn update_gravity_camera(
+    events: &sdl3::EventPump,
+    camera: &mut Camera,
+    physics: &mut PlayerPhysics,
+    collision_height: &HeightField,
+    dt: f32,
+    mouse_delta: [f32; 2],
+    jump_requested: bool,
+) {
+    update_camera_look(events, camera, dt, mouse_delta);
+    update_player_horizontal_movement(events, camera, collision_height, physics.move_speed, dt);
+
+    let ground_height = player_ground_height(camera, physics, collision_height);
+    if physics.on_ground && !jump_requested {
+        if camera.height < ground_height || camera.height - ground_height <= PLAYER_GROUND_SNAP {
+            camera.height = ground_height;
+            physics.vertical_velocity = 0.0;
+            physics.on_ground = true;
+        } else {
+            physics.on_ground = false;
+        }
+    }
+
+    if jump_requested && physics.on_ground {
+        physics.vertical_velocity = PLAYER_JUMP_SPEED;
+        physics.on_ground = false;
+    }
+
+    if !physics.on_ground {
+        physics.vertical_velocity =
+            (physics.vertical_velocity - PLAYER_GRAVITY * dt).max(-PLAYER_MAX_FALL_SPEED);
+        camera.height += physics.vertical_velocity * dt;
+    }
+
+    collide_player_with_terrain(camera, physics, collision_height);
+    camera.vertical_fov = camera.vertical_fov.clamp(0.5, 1.4);
+    camera.max_distance = camera.max_distance.clamp(120.0, 4096.0);
+}
+
+fn apply_gravity_wheel_adjustment(
+    camera: &mut Camera,
+    physics: &mut PlayerPhysics,
+    collision_height: &HeightField,
+    wheel_delta: f32,
+    adjust_move_speed: bool,
+) {
+    let changed = if adjust_move_speed {
+        let previous = physics.move_speed;
+        physics.move_speed = (physics.move_speed + wheel_delta * PLAYER_MOVE_SPEED_SCROLL_STEP)
+            .clamp(PLAYER_MIN_MOVE_SPEED, PLAYER_MAX_MOVE_SPEED);
+        physics.move_speed != previous
+    } else {
+        let previous = physics.eye_height;
+        physics.eye_height = (physics.eye_height + wheel_delta * PLAYER_EYE_HEIGHT_SCROLL_STEP)
+            .clamp(PLAYER_MIN_EYE_HEIGHT, PLAYER_MAX_EYE_HEIGHT);
+        let delta = physics.eye_height - previous;
+        if delta != 0.0 {
+            camera.height += delta;
+            let ground_height = player_ground_height(camera, physics, collision_height);
+            if camera.height < ground_height || physics.on_ground {
+                camera.height = ground_height;
+                physics.vertical_velocity = 0.0;
+                physics.on_ground = true;
+            }
+        }
+        physics.eye_height != previous
+    };
+
+    if changed {
+        println!(
+            "gravity camera height: {:.1}, movement speed: {:.1}",
+            physics.eye_height, physics.move_speed
+        );
+    }
+}
+
+fn update_player_horizontal_movement(
+    events: &sdl3::EventPump,
+    camera: &mut Camera,
+    collision_height: &HeightField,
+    move_speed: f32,
+    dt: f32,
+) {
+    let keyboard = events.keyboard_state();
+    let forward = [camera.yaw.sin(), -camera.yaw.cos()];
+    let right = [camera.yaw.cos(), camera.yaw.sin()];
+    let mut movement = [0.0, 0.0];
+
+    if keyboard.is_scancode_pressed(Scancode::W) {
+        movement[0] += forward[0];
+        movement[1] += forward[1];
+    }
+    if keyboard.is_scancode_pressed(Scancode::S) {
+        movement[0] -= forward[0];
+        movement[1] -= forward[1];
+    }
+    if keyboard.is_scancode_pressed(Scancode::D) {
+        movement[0] += right[0];
+        movement[1] += right[1];
+    }
+    if keyboard.is_scancode_pressed(Scancode::A) {
+        movement[0] -= right[0];
+        movement[1] -= right[1];
+    }
+
+    let length = (movement[0] * movement[0] + movement[1] * movement[1]).sqrt();
+    if length > 0.0 {
+        camera.x += movement[0] / length * move_speed * dt;
+        camera.y += movement[1] / length * move_speed * dt;
+        camera.x = camera.x.clamp(0.0, collision_height.terrain_size[0]);
+        camera.y = camera.y.clamp(0.0, collision_height.terrain_size[1]);
+    }
+}
+
+fn collide_player_with_terrain(
+    camera: &mut Camera,
+    physics: &mut PlayerPhysics,
+    collision_height: &HeightField,
+) {
+    let ground_height = player_ground_height(camera, physics, collision_height);
+    if camera.height <= ground_height {
+        camera.height = ground_height;
+        if physics.vertical_velocity < 0.0 {
+            physics.vertical_velocity = 0.0;
+        }
+        physics.on_ground = true;
+    } else {
+        physics.on_ground = false;
+    }
+}
+
+fn player_ground_height(
+    camera: &Camera,
+    physics: &PlayerPhysics,
+    collision_height: &HeightField,
+) -> f32 {
+    collision_height.height_at(camera.x, camera.y) + physics.eye_height
 }
 
 fn shader_params(
@@ -746,7 +1100,7 @@ fn shader_params(
             width as f32,
             height as f32,
             camera.vertical_fov,
-            HEIGHT_SCALE,
+            TERRAIN_HEIGHT_SCALE,
         ],
         terrain: [
             terrain_maps.terrain_size[0],
@@ -852,6 +1206,9 @@ mod tests {
             r#"
             ray_iteration_count = 200
             performance_render_scale = 0.4
+            start_x = 123.0
+            start_y = 456.0
+            start_height = 78.0
             height_lod_blend_start = 175.0
             # normal detail values intentionally omitted
             "#,
@@ -860,6 +1217,9 @@ mod tests {
 
         assert_eq!(config.ray_iteration_count, 200);
         assert_eq!(config.performance_render_scale, 0.4);
+        assert_eq!(config.start_x, 123.0);
+        assert_eq!(config.start_y, 456.0);
+        assert_eq!(config.start_height, 78.0);
         assert_eq!(config.height_lod_blend_start, 175.0);
         assert_eq!(
             config.normal_detail_blend_start,
@@ -889,5 +1249,29 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("height_lod_blend_start"));
+
+        let error = AppConfig::parse(
+            r#"
+            start_height = -1.0
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("start_height"));
+    }
+
+    #[test]
+    fn samples_height_field_with_bilinear_filtering() {
+        let bytes = [
+            0_u16.to_le_bytes(),
+            u16::MAX.to_le_bytes(),
+            u16::MAX.to_le_bytes(),
+            0_u16.to_le_bytes(),
+        ]
+        .concat();
+        let height_field = HeightField::from_r16_bytes(&bytes, 2, 2, [2.0, 2.0]).unwrap();
+
+        assert_eq!(height_field.height_at(0.0, 0.0), 0.0);
+        assert!((height_field.height_at(0.5, 0.5) - TERRAIN_HEIGHT_SCALE * 0.5).abs() < 0.001);
+        assert!((height_field.height_at(2.0, 0.0) - TERRAIN_HEIGHT_SCALE).abs() < 0.001);
     }
 }

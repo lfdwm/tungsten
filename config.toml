@@ -1,9 +1,16 @@
 # Runtime terrain rendering knobs.
-ray_iteration_count = 700
+# ray_iteration_count = 700
+ray_iteration_count = 1000
 performance_render_scale = 0.5
 
-height_lod_blend_start = 125.0
-height_lod_blend_end = 300.0
+start_x = 1900.0
+start_y = 4460.0
+start_height = 250.0
+
+# height_lod_blend_start = 125.0
+# height_lod_blend_end = 300.0
+height_lod_blend_start = 250.0
+height_lod_blend_end = 600.0
 
 normal_detail_blend_start = 500.0
 normal_detail_blend_end = 1000.0
