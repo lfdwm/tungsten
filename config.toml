@@ -3,6 +3,8 @@
 ray_iteration_count = 1000
 performance_render_scale = 0.5
 present_mode = "immediate"
+near_dda_distance = 512.0
+near_dda_max_steps = 1024
 
 start_x = 1900.0
 start_y = 4460.0

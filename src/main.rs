@@ -38,6 +38,9 @@ const DEFAULT_START_Y: f32 = 330.0;
 const DEFAULT_START_HEIGHT: f32 = 150.0;
 const DEFAULT_RAY_ITERATION_COUNT: u32 = 700;
 const MAX_RAY_ITERATION_COUNT: u32 = 4096;
+const DEFAULT_NEAR_DDA_DISTANCE: f32 = 512.0;
+const DEFAULT_NEAR_DDA_MAX_STEPS: u32 = 1024;
+const MAX_NEAR_DDA_MAX_STEPS: u32 = 4096;
 const DEFAULT_HEIGHT_LOD_BLEND_START: f32 = 125.0;
 const DEFAULT_HEIGHT_LOD_BLEND_END: f32 = 300.0;
 const DEFAULT_NORMAL_DETAIL_BLEND_START: f32 = 500.0;
@@ -66,6 +69,7 @@ struct ShaderParams {
     height_maps: [f32; 4],
     lod_distances: [f32; 4],
     raymarch: [f32; 4],
+    near_dda: [f32; 4],
     ray_forward: [f32; 4],
     ray_right: [f32; 4],
     ray_up: [f32; 4],
@@ -230,6 +234,8 @@ struct AppConfig {
     ray_iteration_count: u32,
     performance_render_scale: f32,
     present_mode: AppPresentMode,
+    near_dda_distance: f32,
+    near_dda_max_steps: u32,
     start_x: f32,
     start_y: f32,
     start_height: f32,
@@ -270,6 +276,8 @@ impl Default for AppConfig {
             ray_iteration_count: DEFAULT_RAY_ITERATION_COUNT,
             performance_render_scale: DEFAULT_PERFORMANCE_RENDER_SCALE,
             present_mode: DEFAULT_PRESENT_MODE,
+            near_dda_distance: DEFAULT_NEAR_DDA_DISTANCE,
+            near_dda_max_steps: DEFAULT_NEAR_DDA_MAX_STEPS,
             start_x: DEFAULT_START_X,
             start_y: DEFAULT_START_Y,
             start_height: DEFAULT_START_HEIGHT,
@@ -339,6 +347,12 @@ impl AppConfig {
                 "present_mode" => {
                     config.present_mode = parse_present_mode_config(value, line_number)?
                 }
+                "near_dda_distance" => {
+                    config.near_dda_distance = parse_config_f32(key, value, line_number)?
+                }
+                "near_dda_max_steps" => {
+                    config.near_dda_max_steps = parse_config_u32(key, value, line_number)?
+                }
                 "start_x" => config.start_x = parse_config_f32(key, value, line_number)?,
                 "start_y" => config.start_y = parse_config_f32(key, value, line_number)?,
                 "start_height" => config.start_height = parse_config_f32(key, value, line_number)?,
@@ -372,6 +386,14 @@ impl AppConfig {
                 "`performance_render_scale` must be greater than 0.0 and no more than 1.0"
                     .to_owned(),
             );
+        }
+        if self.near_dda_distance <= 0.0 {
+            return Err("`near_dda_distance` must be greater than 0.0".to_owned());
+        }
+        if !(1..=MAX_NEAR_DDA_MAX_STEPS).contains(&self.near_dda_max_steps) {
+            return Err(format!(
+                "`near_dda_max_steps` must be between 1 and {MAX_NEAR_DDA_MAX_STEPS}"
+            ));
         }
         if self.start_x < 0.0 || self.start_y < 0.0 || self.start_height < 0.0 {
             return Err("`start_x`, `start_y`, and `start_height` must be non-negative".to_owned());
@@ -1265,6 +1287,12 @@ fn shader_params(
             camera.max_distance,
             config.ray_iteration_count as f32,
         ],
+        near_dda: [
+            config.near_dda_distance,
+            config.near_dda_max_steps as f32,
+            0.0,
+            0.0,
+        ],
         ray_forward: [
             ray_basis.forward[0],
             ray_basis.forward[1],
@@ -1346,6 +1374,8 @@ mod tests {
             ray_iteration_count = 200
             performance_render_scale = 0.4
             present_mode = "mailbox"
+            near_dda_distance = 96.0
+            near_dda_max_steps = 128
             start_x = 123.0
             start_y = 456.0
             start_height = 78.0
@@ -1358,6 +1388,8 @@ mod tests {
         assert_eq!(config.ray_iteration_count, 200);
         assert_eq!(config.performance_render_scale, 0.4);
         assert_eq!(config.present_mode, AppPresentMode::Mailbox);
+        assert_eq!(config.near_dda_distance, 96.0);
+        assert_eq!(config.near_dda_max_steps, 128);
         assert_eq!(config.start_x, 123.0);
         assert_eq!(config.start_y, 456.0);
         assert_eq!(config.start_height, 78.0);
@@ -1428,6 +1460,22 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("present_mode"));
+
+        let error = AppConfig::parse(
+            r#"
+            near_dda_distance = 0.0
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("near_dda_distance"));
+
+        let error = AppConfig::parse(
+            r#"
+            near_dda_max_steps = 0
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("near_dda_max_steps"));
     }
 
     #[test]

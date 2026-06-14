@@ -11,6 +11,7 @@ layout(set = 3, binding = 0) uniform Params {
     vec4 height_maps;
     vec4 lod_distances;
     vec4 raymarch;
+    vec4 near_dda;
     vec4 ray_forward;
     vec4 ray_right;
     vec4 ray_up;
@@ -29,8 +30,7 @@ const float LARGE_STEP_PROBE_CELL_FACTOR = 0.75;
 const float CLOSE_TERRAIN_STEP_CELL_FACTOR = 0.45;
 const float CLOSE_TERRAIN_STEP_BLEND_START = 2.0;
 const float CLOSE_TERRAIN_STEP_BLEND_END = 12.0;
-const float NEAR_DDA_DISTANCE = 512.0;
-const int NEAR_DDA_MAX_STEPS = 1024;
+const int MAX_NEAR_DDA_STEPS = 4096;
 const float NEAR_DDA_AXIS_EPSILON = 0.00001;
 const float NEAR_DDA_T_EPSILON = 0.00001;
 
@@ -290,7 +290,9 @@ bool raycast_near_height_cells(
     out float hit_dist,
     out float hit_horizontal_dist
 ) {
-    float dda_end_t = min(max_t, NEAR_DDA_DISTANCE / ray_horizontal);
+    float dda_distance = max(near_dda.x, 0.0);
+    int dda_max_steps = clamp(int(near_dda.y + 0.5), 1, MAX_NEAR_DDA_STEPS);
+    float dda_end_t = min(max_t, dda_distance / ray_horizontal);
     exit_t = start_t;
 
     if (start_t >= dda_end_t) {
@@ -318,7 +320,11 @@ bool raycast_near_height_cells(
     float current_t = start_t;
     float current_height = height_near_cell(cell);
 
-    for (int i = 0; i < NEAR_DDA_MAX_STEPS; i++) {
+    for (int i = 0; i < MAX_NEAR_DDA_STEPS; i++) {
+        if (i >= dda_max_steps) {
+            break;
+        }
+
         float current_y = origin.y + ray.y * current_t;
         if (current_y <= current_height) {
             set_terrain_hit(origin, ray, ray_horizontal, current_t, hit_pos, hit_dist, hit_horizontal_dist);

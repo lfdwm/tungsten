@@ -8,6 +8,8 @@ Runtime rendering knobs live in `config.toml`:
 ray_iteration_count = 700
 performance_render_scale = 0.5
 present_mode = "vsync" # "vsync", "immediate", or "mailbox"
+near_dda_distance = 512.0
+near_dda_max_steps = 1024
 
 start_x = 250.0
 start_y = 330.0
