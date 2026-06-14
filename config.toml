@@ -1,6 +1,6 @@
 # Runtime terrain rendering knobs.
 # ray_iteration_count = 700
-ray_iteration_count = 1000
+ray_iteration_count = 100
 performance_render_scale = 0.5
 present_mode = "immediate"
 near_dda_distance = 512.0

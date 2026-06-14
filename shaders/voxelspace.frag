@@ -33,6 +33,11 @@ const float CLOSE_TERRAIN_STEP_BLEND_END = 12.0;
 const int MAX_NEAR_DDA_STEPS = 4096;
 const float NEAR_DDA_AXIS_EPSILON = 0.00001;
 const float NEAR_DDA_T_EPSILON = 0.00001;
+const int BACKDROP_MAX_STEPS = 256;
+const float BACKDROP_MIN_HORIZONTAL_STEP = 0.5;
+const float BACKDROP_MAX_HORIZONTAL_STEP = 8.0;
+const float BACKDROP_HIT_BIAS = 2.0;
+const float BACKDROP_START_BIAS = 2.0;
 
 float height_cell(sampler2D height_map, vec2 world_pos, vec2 map_size) {
     vec2 terrain_uv = world_pos / terrain.xy;
@@ -162,6 +167,10 @@ vec3 terrain_color(vec3 hit_pos, float horizontal_dist) {
     }
 
     return base * light;
+}
+
+vec3 backdrop_terrain_color(vec2 world_pos) {
+    return color_at(world_pos) * FAR_TERRAIN_LIGHT;
 }
 
 float raymarch_step_size(float horizontal_dist, float lod_blend) {
@@ -380,10 +389,22 @@ bool raycast_near_height_cells(
     return false;
 }
 
-bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dist, out float hit_horizontal_dist) {
+bool raymarch_terrain(
+    vec3 origin,
+    vec3 ray,
+    out vec3 hit_pos,
+    out float hit_dist,
+    out float hit_horizontal_dist,
+    out bool backdrop_available,
+    out float backdrop_start_horizontal_dist,
+    out float backdrop_end_horizontal_dist
+) {
     float bounds_enter_t;
     float bounds_exit_t;
     int iteration_count = clamp(int(raymarch.w + 0.5), 1, MAX_RAY_ITERATIONS);
+    backdrop_available = false;
+    backdrop_start_horizontal_dist = 0.0;
+    backdrop_end_horizontal_dist = 0.0;
 
     if (!terrain_bounds_interval(origin, ray, bounds_enter_t, bounds_exit_t)) {
         return false;
@@ -392,6 +413,7 @@ bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dis
     float previous_t = max(max(raymarch.y, 0.05), bounds_enter_t);
     float ray_horizontal = max(length(ray.xz), 0.001);
     float max_t = min(raymarch.z / ray_horizontal, bounds_exit_t);
+    backdrop_end_horizontal_dist = max_t * ray_horizontal;
 
     if (previous_t > max_t) {
         return false;
@@ -457,13 +479,77 @@ bool raymarch_terrain(vec3 origin, vec3 ray, out vec3 hit_pos, out float hit_dis
         }
 
         if (reached_max_t) {
-            break;
+            return false;
         }
 
         previous_t = t;
         previous_delta = delta;
         previous_horizontal = horizontal;
         previous_lod_blend = lod_blend;
+    }
+
+    backdrop_start_horizontal_dist = previous_horizontal;
+    backdrop_available = backdrop_end_horizontal_dist > backdrop_start_horizontal_dist + BACKDROP_MIN_HORIZONTAL_STEP;
+    return false;
+}
+
+float backdrop_height_margin(vec3 origin, vec3 ray, float ray_horizontal, float horizontal_dist) {
+    float t = horizontal_dist / ray_horizontal;
+    vec2 world_pos = origin.xz + ray.xz * t;
+    float ray_height = origin.y + ray.y * t;
+    float terrain_height = height_cell(height_far_map, world_pos, height_maps.zw);
+
+    return terrain_height - ray_height;
+}
+
+bool raycast_backdrop(
+    vec3 origin,
+    vec3 ray,
+    float start_horizontal_dist,
+    float end_horizontal_dist,
+    out vec3 hit_pos,
+    out float hit_horizontal_dist
+) {
+    float ray_horizontal = max(length(ray.xz), 0.001);
+    float horizontal = start_horizontal_dist + BACKDROP_START_BIAS;
+
+    if (horizontal >= end_horizontal_dist || ray_horizontal <= 0.001) {
+        return false;
+    }
+
+    float range_step = max((end_horizontal_dist - horizontal) / float(BACKDROP_MAX_STEPS), BACKDROP_MIN_HORIZONTAL_STEP);
+    float previous_margin = backdrop_height_margin(origin, ray, ray_horizontal, horizontal);
+    if (previous_margin >= -BACKDROP_HIT_BIAS) {
+        hit_horizontal_dist = horizontal;
+        hit_pos = origin + ray * (hit_horizontal_dist / ray_horizontal);
+        return true;
+    }
+
+    for (int i = 0; i < BACKDROP_MAX_STEPS; i++) {
+        float step_size = max(
+            range_step,
+            clamp(horizontal * 0.025, BACKDROP_MIN_HORIZONTAL_STEP, BACKDROP_MAX_HORIZONTAL_STEP)
+        );
+        float next_horizontal = min(horizontal + step_size, end_horizontal_dist);
+        float margin = backdrop_height_margin(origin, ray, ray_horizontal, next_horizontal);
+
+        if (margin >= -BACKDROP_HIT_BIAS) {
+            float denominator = margin - previous_margin;
+            float blend = abs(denominator) > 0.0001
+                ? clamp((-BACKDROP_HIT_BIAS - previous_margin) / denominator, 0.0, 1.0)
+                : 1.0;
+
+            hit_horizontal_dist = mix(horizontal, next_horizontal, blend);
+            hit_pos = origin + ray * (hit_horizontal_dist / ray_horizontal);
+            return true;
+        }
+
+        if (next_horizontal >= end_horizontal_dist) {
+            break;
+        }
+
+        horizontal = next_horizontal;
+        previous_margin = margin;
     }
 
     return false;
@@ -478,10 +564,33 @@ void main() {
     vec3 hit_pos;
     float hit_dist;
     float hit_horizontal_dist;
+    bool backdrop_available;
+    float backdrop_start_horizontal_dist;
+    float backdrop_end_horizontal_dist;
 
-    if (raymarch_terrain(origin, ray, hit_pos, hit_dist, hit_horizontal_dist)) {
+    if (raymarch_terrain(
+        origin,
+        ray,
+        hit_pos,
+        hit_dist,
+        hit_horizontal_dist,
+        backdrop_available,
+        backdrop_start_horizontal_dist,
+        backdrop_end_horizontal_dist
+    )) {
         float fog = smoothstep(raymarch.z * 0.62, raymarch.z, hit_horizontal_dist);
         vec3 color = mix(terrain_color(hit_pos, hit_horizontal_dist), sky, fog * 0.86);
+        out_color = vec4(color, 1.0);
+    } else if (backdrop_available && raycast_backdrop(
+        origin,
+        ray,
+        backdrop_start_horizontal_dist,
+        backdrop_end_horizontal_dist,
+        hit_pos,
+        hit_horizontal_dist
+    )) {
+        float fog = smoothstep(raymarch.z * 0.45, raymarch.z, hit_horizontal_dist);
+        vec3 color = mix(backdrop_terrain_color(hit_pos.xz), sky, fog * 0.9);
         out_color = vec4(color, 1.0);
     } else {
         out_color = vec4(sky, 1.0);

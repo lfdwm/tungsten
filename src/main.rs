@@ -527,7 +527,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         yaw: 0.4,
         pitch: -0.08,
         vertical_fov: 1.05,
-        max_distance: 3000.0,
+        max_distance: terrain_full_map_distance(terrain_maps.terrain_size),
     };
     let mut camera_mode = CameraMode::Freecam;
     let mut player_physics = PlayerPhysics::new();
@@ -1091,7 +1091,7 @@ fn update_freecam(events: &sdl3::EventPump, camera: &mut Camera, dt: f32, mouse_
 
     camera.height = camera.height.clamp(20.0, 520.0);
     camera.vertical_fov = camera.vertical_fov.clamp(0.5, 1.4);
-    camera.max_distance = camera.max_distance.clamp(120.0, 4096.0);
+    camera.max_distance = camera.max_distance.max(120.0);
 }
 
 fn enable_gravity_mode(
@@ -1143,7 +1143,11 @@ fn update_gravity_camera(
 
     collide_player_with_terrain(camera, physics, collision_height);
     camera.vertical_fov = camera.vertical_fov.clamp(0.5, 1.4);
-    camera.max_distance = camera.max_distance.clamp(120.0, 4096.0);
+    camera.max_distance = camera.max_distance.max(120.0);
+}
+
+fn terrain_full_map_distance(terrain_size: [f32; 2]) -> f32 {
+    terrain_size[0].hypot(terrain_size[1])
 }
 
 fn apply_gravity_wheel_adjustment(
