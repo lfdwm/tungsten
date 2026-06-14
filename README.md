@@ -38,3 +38,13 @@ cargo run --release --bin max_height_mip -- \
   --output "assets/untracked/continent Height Max 1024.r16" \
   --output-size 1024x1024
 ```
+
+Generate a bilinear upsampled R16 heightmap:
+
+```sh
+cargo run --release --bin upsample_heightmap -- \
+  --input "assets/untracked/continent Height Output 8192.r16" \
+  --input-size 8192x8192 \
+  --output "assets/untracked/continent Height Output 16384 interpolated.r16" \
+  --output-size 16384x16384
+```
