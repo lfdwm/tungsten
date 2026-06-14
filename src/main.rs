@@ -21,7 +21,8 @@ use sdl3::{
 const WINDOW_WIDTH: u32 = 1280;
 const WINDOW_HEIGHT: u32 = 720;
 const CONFIG_PATH: &str = "config.toml";
-const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 4096_diffuse.png";
+//const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 4096_diffuse.png";
+const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 8192_diffuse.png";
 //const HEIGHT_MAP_NEAR_PATH: &str = "assets/untracked/continent Height Output 8192.r16";
 const HEIGHT_MAP_NEAR_PATH: &str = "assets/untracked/continent Height Output 16384.r16";
 const HEIGHT_MAP_NEAR_WIDTH: u32 = 16384;

@@ -48,3 +48,12 @@ cargo run --release --bin upsample_heightmap -- \
   --output "assets/untracked/continent Height Output 16384 interpolated.r16" \
   --output-size 16384x16384
 ```
+
+Generate a dithered bilinear upsampled colormap:
+
+```sh
+cargo run --release --bin upsample_colormap -- \
+  --input "assets/untracked/continent Material Output 4096_diffuse.png" \
+  --output "assets/untracked/continent Material Output 16384_diffuse_dithered.png" \
+  --output-size 16384x16384
+```
