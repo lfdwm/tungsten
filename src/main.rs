@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    fs, io,
+    fs, io, thread,
     time::{Duration, Instant},
 };
 
@@ -47,6 +47,7 @@ const DEFAULT_NORMAL_DETAIL_BLEND_START: f32 = 500.0;
 const DEFAULT_NORMAL_DETAIL_BLEND_END: f32 = 1000.0;
 const DEFAULT_PERFORMANCE_RENDER_SCALE: f32 = 0.5;
 const DEFAULT_PRESENT_MODE: AppPresentMode = AppPresentMode::Vsync;
+const DEFAULT_MAX_FRAMERATE: f32 = 0.0;
 const PLAYER_EYE_HEIGHT: f32 = 1.0;
 const PLAYER_MOVE_SPEED: f32 = 5.0;
 const PLAYER_MIN_EYE_HEIGHT: f32 = 1.0;
@@ -234,6 +235,7 @@ struct AppConfig {
     ray_iteration_count: u32,
     performance_render_scale: f32,
     present_mode: AppPresentMode,
+    max_framerate: f32,
     near_dda_distance: f32,
     near_dda_max_steps: u32,
     start_x: f32,
@@ -276,6 +278,7 @@ impl Default for AppConfig {
             ray_iteration_count: DEFAULT_RAY_ITERATION_COUNT,
             performance_render_scale: DEFAULT_PERFORMANCE_RENDER_SCALE,
             present_mode: DEFAULT_PRESENT_MODE,
+            max_framerate: DEFAULT_MAX_FRAMERATE,
             near_dda_distance: DEFAULT_NEAR_DDA_DISTANCE,
             near_dda_max_steps: DEFAULT_NEAR_DDA_MAX_STEPS,
             start_x: DEFAULT_START_X,
@@ -347,6 +350,9 @@ impl AppConfig {
                 "present_mode" => {
                     config.present_mode = parse_present_mode_config(value, line_number)?
                 }
+                "max_framerate" => {
+                    config.max_framerate = parse_config_f32(key, value, line_number)?
+                }
                 "near_dda_distance" => {
                     config.near_dda_distance = parse_config_f32(key, value, line_number)?
                 }
@@ -386,6 +392,9 @@ impl AppConfig {
                 "`performance_render_scale` must be greater than 0.0 and no more than 1.0"
                     .to_owned(),
             );
+        }
+        if self.max_framerate < 0.0 {
+            return Err("`max_framerate` must be non-negative; use 0.0 for unlimited".to_owned());
         }
         if self.near_dda_distance <= 0.0 {
             return Err("`near_dda_distance` must be greater than 0.0".to_owned());
@@ -688,9 +697,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         fps_counter.update(frame_duration);
+        limit_framerate(now, config.max_framerate);
     }
 
     Ok(())
+}
+
+fn limit_framerate(frame_start: Instant, max_framerate: f32) {
+    if max_framerate <= 0.0 {
+        return;
+    }
+
+    let target_frame_duration = Duration::from_secs_f32(1.0 / max_framerate);
+    if let Some(remaining) = target_frame_duration.checked_sub(frame_start.elapsed()) {
+        thread::sleep(remaining);
+    }
 }
 
 fn create_terrain_pipeline(
@@ -1378,6 +1399,7 @@ mod tests {
             ray_iteration_count = 200
             performance_render_scale = 0.4
             present_mode = "mailbox"
+            max_framerate = 120.0
             near_dda_distance = 96.0
             near_dda_max_steps = 128
             start_x = 123.0
@@ -1392,6 +1414,7 @@ mod tests {
         assert_eq!(config.ray_iteration_count, 200);
         assert_eq!(config.performance_render_scale, 0.4);
         assert_eq!(config.present_mode, AppPresentMode::Mailbox);
+        assert_eq!(config.max_framerate, 120.0);
         assert_eq!(config.near_dda_distance, 96.0);
         assert_eq!(config.near_dda_max_steps, 128);
         assert_eq!(config.start_x, 123.0);
@@ -1472,6 +1495,14 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("near_dda_distance"));
+
+        let error = AppConfig::parse(
+            r#"
+            max_framerate = -1.0
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("max_framerate"));
 
         let error = AppConfig::parse(
             r#"

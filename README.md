@@ -8,6 +8,7 @@ Runtime rendering knobs live in `config.toml`:
 ray_iteration_count = 700
 performance_render_scale = 0.5
 present_mode = "vsync" # "vsync", "immediate", or "mailbox"
+max_framerate = 0.0 # 0.0 means unlimited
 near_dda_distance = 512.0
 near_dda_max_steps = 1024
 
@@ -22,7 +23,7 @@ normal_detail_blend_start = 500.0
 normal_detail_blend_end = 1000.0
 ```
 
-The config is loaded once at startup. Missing keys fall back to the built-in defaults. Use `present_mode = "immediate"` for raw throughput measurement, `present_mode = "mailbox"` for low-latency no-tear presentation where supported, or `present_mode = "vsync"` for display-paced presentation.
+The config is loaded once at startup. Missing keys fall back to the built-in defaults. Use `present_mode = "immediate"` for raw throughput measurement, `present_mode = "mailbox"` for low-latency no-tear presentation where supported, or `present_mode = "vsync"` for display-paced presentation. Set `max_framerate` above `0.0` to add a CPU-side frame cap.
 
 ## Controls
 
