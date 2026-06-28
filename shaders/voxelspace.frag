@@ -12,6 +12,7 @@ layout(set = 3, binding = 0) uniform Params {
     vec4 lod_distances;
     vec4 raymarch;
     vec4 near_dda;
+    vec4 debug;
     vec4 ray_forward;
     vec4 ray_right;
     vec4 ray_up;
@@ -38,6 +39,16 @@ const float BACKDROP_MIN_HORIZONTAL_STEP = 0.5;
 const float BACKDROP_MAX_HORIZONTAL_STEP = 8.0;
 const float BACKDROP_HIT_BIAS = 2.0;
 const float BACKDROP_START_BIAS = 2.0;
+const int DEBUG_NONE = 0;
+const int DEBUG_HEIGHT_SOURCES = 1;
+const int DEBUG_HIT_METHODS = 2;
+const int DEBUG_NORMAL_LIGHTING = 3;
+const float DEBUG_COLOR_BLEND = 0.5;
+const int HIT_METHOD_NONE = 0;
+const int HIT_METHOD_NEAR_DDA = 1;
+const int HIT_METHOD_RAYMARCH = 2;
+const int HIT_METHOD_LARGE_STEP_PROBE = 3;
+const int HIT_METHOD_BACKDROP = 4;
 
 float height_cell(sampler2D height_map, vec2 world_pos, vec2 map_size) {
     vec2 terrain_uv = world_pos / terrain.xy;
@@ -171,6 +182,74 @@ vec3 terrain_color(vec3 hit_pos, float horizontal_dist) {
 
 vec3 backdrop_terrain_color(vec2 world_pos) {
     return color_at(world_pos) * FAR_TERRAIN_LIGHT;
+}
+
+int debug_mode() {
+    return int(debug.x + 0.5);
+}
+
+vec3 debug_height_source_color(float horizontal_dist, bool backdrop_hit) {
+    if (backdrop_hit) {
+        return vec3(1.0, 0.20, 0.05);
+    }
+
+    float lod_blend = height_lod_blend(horizontal_dist);
+    if (lod_blend <= 0.001) {
+        return vec3(0.05, 0.35, 1.0);
+    }
+    if (lod_blend >= 0.999) {
+        return vec3(1.0, 0.70, 0.05);
+    }
+
+    return vec3(0.75, 0.15, 1.0);
+}
+
+vec3 debug_hit_method_color(int hit_method) {
+    if (hit_method == HIT_METHOD_NEAR_DDA) {
+        return vec3(0.05, 1.0, 0.25);
+    }
+    if (hit_method == HIT_METHOD_RAYMARCH) {
+        return vec3(0.05, 0.75, 1.0);
+    }
+    if (hit_method == HIT_METHOD_LARGE_STEP_PROBE) {
+        return vec3(1.0, 0.90, 0.05);
+    }
+    if (hit_method == HIT_METHOD_BACKDROP) {
+        return vec3(1.0, 0.15, 0.85);
+    }
+
+    return vec3(0.1);
+}
+
+vec3 debug_normal_lighting_color(float horizontal_dist, bool backdrop_hit) {
+    if (backdrop_hit) {
+        return vec3(1.0, 0.20, 0.05);
+    }
+
+    float normal_blend = smoothstep(lod_distances.z, lod_distances.w, horizontal_dist);
+    if (normal_blend <= 0.001) {
+        return vec3(0.05, 1.0, 0.25);
+    }
+    if (normal_blend >= 0.999) {
+        return vec3(0.95, 0.20, 0.05);
+    }
+
+    return vec3(1.0, 0.85, 0.05);
+}
+
+vec3 debug_terrain_color(float horizontal_dist, int hit_method, bool backdrop_hit) {
+    int mode = debug_mode();
+    if (mode == DEBUG_HEIGHT_SOURCES) {
+        return debug_height_source_color(horizontal_dist, backdrop_hit);
+    }
+    if (mode == DEBUG_HIT_METHODS) {
+        return debug_hit_method_color(hit_method);
+    }
+    if (mode == DEBUG_NORMAL_LIGHTING) {
+        return debug_normal_lighting_color(horizontal_dist, backdrop_hit);
+    }
+
+    return vec3(0.0);
 }
 
 float raymarch_step_size(float horizontal_dist, float lod_blend) {
@@ -397,11 +476,13 @@ bool raymarch_terrain(
     out float hit_horizontal_dist,
     out bool backdrop_available,
     out float backdrop_start_horizontal_dist,
-    out float backdrop_end_horizontal_dist
+    out float backdrop_end_horizontal_dist,
+    out int hit_method
 ) {
     float bounds_enter_t;
     float bounds_exit_t;
     int iteration_count = clamp(int(raymarch.w + 0.5), 1, MAX_RAY_ITERATIONS);
+    hit_method = HIT_METHOD_NONE;
     backdrop_available = false;
     backdrop_start_horizontal_dist = 0.0;
     backdrop_end_horizontal_dist = 0.0;
@@ -431,6 +512,7 @@ bool raymarch_terrain(
         hit_dist,
         hit_horizontal_dist
     )) {
+        hit_method = HIT_METHOD_NEAR_DDA;
         return true;
     }
 
@@ -448,6 +530,7 @@ bool raymarch_terrain(
         hit_dist = previous_t;
         hit_pos = origin + ray * hit_dist;
         hit_horizontal_dist = previous_horizontal;
+        hit_method = HIT_METHOD_RAYMARCH;
         return true;
     }
 
@@ -466,6 +549,7 @@ bool raymarch_terrain(
 
         if (should_probe_large_step(horizontal_step, previous_lod_blend, previous_delta)) {
             if (probe_large_step(origin, ray, ray_horizontal, previous_t, t, hit_pos, hit_dist, hit_horizontal_dist)) {
+                hit_method = HIT_METHOD_LARGE_STEP_PROBE;
                 return true;
             }
         }
@@ -475,6 +559,7 @@ bool raymarch_terrain(
         float delta = terrain_delta(point, lod_blend);
 
         if (delta <= 0.0) {
+            hit_method = HIT_METHOD_RAYMARCH;
             return refine_terrain_hit(origin, ray, ray_horizontal, previous_t, t, hit_pos, hit_dist, hit_horizontal_dist);
         }
 
@@ -567,6 +652,7 @@ void main() {
     bool backdrop_available;
     float backdrop_start_horizontal_dist;
     float backdrop_end_horizontal_dist;
+    int hit_method;
 
     if (raymarch_terrain(
         origin,
@@ -576,10 +662,16 @@ void main() {
         hit_horizontal_dist,
         backdrop_available,
         backdrop_start_horizontal_dist,
-        backdrop_end_horizontal_dist
+        backdrop_end_horizontal_dist,
+        hit_method
     )) {
+        int mode = debug_mode();
         float fog = smoothstep(raymarch.z * 0.62, raymarch.z, hit_horizontal_dist);
         vec3 color = mix(terrain_color(hit_pos, hit_horizontal_dist), sky, fog * 0.86);
+        if (mode != DEBUG_NONE) {
+            vec3 debug_color = debug_terrain_color(hit_horizontal_dist, hit_method, false);
+            color = mix(color, debug_color, DEBUG_COLOR_BLEND);
+        }
         out_color = vec4(color, 1.0);
     } else if (backdrop_available && raycast_backdrop(
         origin,
@@ -589,8 +681,13 @@ void main() {
         hit_pos,
         hit_horizontal_dist
     )) {
+        int mode = debug_mode();
         float fog = smoothstep(raymarch.z * 0.45, raymarch.z, hit_horizontal_dist);
         vec3 color = mix(backdrop_terrain_color(hit_pos.xz), sky, fog * 0.9);
+        if (mode != DEBUG_NONE) {
+            vec3 debug_color = debug_terrain_color(hit_horizontal_dist, HIT_METHOD_BACKDROP, true);
+            color = mix(color, debug_color, DEBUG_COLOR_BLEND);
+        }
         out_color = vec4(color, 1.0);
     } else {
         out_color = vec4(sky, 1.0);

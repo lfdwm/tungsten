@@ -48,6 +48,7 @@ const DEFAULT_NORMAL_DETAIL_BLEND_END: f32 = 1000.0;
 const DEFAULT_PERFORMANCE_RENDER_SCALE: f32 = 0.5;
 const DEFAULT_PRESENT_MODE: AppPresentMode = AppPresentMode::Vsync;
 const DEFAULT_MAX_FRAMERATE: f32 = 0.0;
+const DEFAULT_RENDER_DEBUG_VISUALS: bool = false;
 const PLAYER_EYE_HEIGHT: f32 = 1.0;
 const PLAYER_MOVE_SPEED: f32 = 5.0;
 const PLAYER_MIN_EYE_HEIGHT: f32 = 1.0;
@@ -71,6 +72,7 @@ struct ShaderParams {
     lod_distances: [f32; 4],
     raymarch: [f32; 4],
     near_dda: [f32; 4],
+    debug: [f32; 4],
     ray_forward: [f32; 4],
     ray_right: [f32; 4],
     ray_up: [f32; 4],
@@ -236,6 +238,7 @@ struct AppConfig {
     performance_render_scale: f32,
     present_mode: AppPresentMode,
     max_framerate: f32,
+    render_debug_visuals: bool,
     near_dda_distance: f32,
     near_dda_max_steps: u32,
     start_x: f32,
@@ -252,6 +255,58 @@ enum AppPresentMode {
     Vsync,
     Immediate,
     Mailbox,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DebugVisualMode {
+    None,
+    HeightSources,
+    HitMethods,
+    NormalLighting,
+}
+
+impl DebugVisualMode {
+    fn next(self) -> Self {
+        match self {
+            Self::None => Self::HeightSources,
+            Self::HeightSources => Self::HitMethods,
+            Self::HitMethods => Self::NormalLighting,
+            Self::NormalLighting => Self::None,
+        }
+    }
+
+    fn as_shader_value(self) -> f32 {
+        match self {
+            Self::None => 0.0,
+            Self::HeightSources => 1.0,
+            Self::HitMethods => 2.0,
+            Self::NormalLighting => 3.0,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::HeightSources => "height sources",
+            Self::HitMethods => "ray/hit methods",
+            Self::NormalLighting => "normal lighting",
+        }
+    }
+
+    fn color_key(self) -> &'static str {
+        match self {
+            Self::None => "  no debug colors",
+            Self::HeightSources => {
+                "  blue: near 16k height map\n  purple: near/far height blend\n  orange: far 2k max-height map\n  red/orange: far 2D backdrop"
+            }
+            Self::HitMethods => {
+                "  green: near 16k DDA hit\n  cyan: main raymarch hit\n  yellow: large-step probe hit\n  magenta: far 2D backdrop hit"
+            }
+            Self::NormalLighting => {
+                "  green: detailed sampled normals\n  yellow: detailed-to-flat lighting blend\n  red: flat far terrain light\n  red/orange: far 2D backdrop flat light"
+            }
+        }
+    }
 }
 
 impl AppPresentMode {
@@ -279,6 +334,7 @@ impl Default for AppConfig {
             performance_render_scale: DEFAULT_PERFORMANCE_RENDER_SCALE,
             present_mode: DEFAULT_PRESENT_MODE,
             max_framerate: DEFAULT_MAX_FRAMERATE,
+            render_debug_visuals: DEFAULT_RENDER_DEBUG_VISUALS,
             near_dda_distance: DEFAULT_NEAR_DDA_DISTANCE,
             near_dda_max_steps: DEFAULT_NEAR_DDA_MAX_STEPS,
             start_x: DEFAULT_START_X,
@@ -352,6 +408,9 @@ impl AppConfig {
                 }
                 "max_framerate" => {
                     config.max_framerate = parse_config_f32(key, value, line_number)?
+                }
+                "render_debug_visuals" => {
+                    config.render_debug_visuals = parse_config_bool(key, value, line_number)?
                 }
                 "near_dda_distance" => {
                     config.near_dda_distance = parse_config_f32(key, value, line_number)?
@@ -440,6 +499,16 @@ fn parse_config_f32(key: &str, value: &str, line_number: usize) -> Result<f32, S
     }
 
     Ok(parsed)
+}
+
+fn parse_config_bool(key: &str, value: &str, line_number: usize) -> Result<bool, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!(
+            "line {line_number}: `{key}` must be `true` or `false`"
+        )),
+    }
 }
 
 fn parse_present_mode_config(value: &str, line_number: usize) -> Result<AppPresentMode, String> {
@@ -541,6 +610,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut camera_mode = CameraMode::Freecam;
     let mut player_physics = PlayerPhysics::new();
     let mut fps_counter = FpsCounter::new();
+    let mut debug_visual_mode = DebugVisualMode::None;
 
     let mut events = sdl.event_pump()?;
     let mut previous_frame = Instant::now();
@@ -586,6 +656,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                     ..
                 } => {
                     jump_requested = true;
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::F3),
+                    repeat: false,
+                    ..
+                } => {
+                    if config.render_debug_visuals {
+                        debug_visual_mode = debug_visual_mode.next();
+                        println!(
+                            "debug visuals: {}\n{}",
+                            debug_visual_mode.label(),
+                            debug_visual_mode.color_key()
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -642,6 +726,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             render_target.width,
             render_target.height,
             &config,
+            debug_visual_mode,
         );
 
         let color_targets = [ColorTargetInfo::default()
@@ -1277,6 +1362,7 @@ fn shader_params(
     width: u32,
     height: u32,
     config: &AppConfig,
+    debug_visual_mode: DebugVisualMode,
 ) -> ShaderParams {
     let ray_basis = camera_ray_basis(camera, width, height);
 
@@ -1318,6 +1404,7 @@ fn shader_params(
             0.0,
             0.0,
         ],
+        debug: [debug_visual_mode.as_shader_value(), 0.0, 0.0, 0.0],
         ray_forward: [
             ray_basis.forward[0],
             ray_basis.forward[1],
@@ -1400,6 +1487,7 @@ mod tests {
             performance_render_scale = 0.4
             present_mode = "mailbox"
             max_framerate = 120.0
+            render_debug_visuals = true
             near_dda_distance = 96.0
             near_dda_max_steps = 128
             start_x = 123.0
@@ -1415,6 +1503,7 @@ mod tests {
         assert_eq!(config.performance_render_scale, 0.4);
         assert_eq!(config.present_mode, AppPresentMode::Mailbox);
         assert_eq!(config.max_framerate, 120.0);
+        assert!(config.render_debug_visuals);
         assert_eq!(config.near_dda_distance, 96.0);
         assert_eq!(config.near_dda_max_steps, 128);
         assert_eq!(config.start_x, 123.0);
@@ -1511,6 +1600,14 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("near_dda_max_steps"));
+
+        let error = AppConfig::parse(
+            r#"
+            render_debug_visuals = maybe
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("render_debug_visuals"));
     }
 
     #[test]
