@@ -9,7 +9,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use image::GenericImageView;
 use sdl3::{
     event::Event,
     gpu::{
@@ -22,6 +21,7 @@ use sdl3::{
     keyboard::{Keycode, Scancode},
     pixels::Color,
 };
+use tungsten::worldmap::{WorldmapManifest, manifest_dir};
 
 const WINDOW_WIDTH: u32 = 1280;
 const WINDOW_HEIGHT: u32 = 720;
@@ -30,21 +30,16 @@ const CAMERA_RECORDING_DIR: &str = "recordings";
 const CAMERA_RECORDING_INTERVAL_FRAMES: u64 = 10;
 const REPLAY_STATS_BUCKET_FRAMES: u64 = 10;
 const REPLAY_SUMMARY_WARMUP_FRAMES: u64 = 10;
-//const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 4096_diffuse.png";
-const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 8192_diffuse.png";
-//const HEIGHT_MAP_NEAR_PATH: &str = "assets/untracked/continent Height Output 8192.r16";
-const HEIGHT_MAP_NEAR_PATH: &str = "assets/untracked/continent Height Output 16384.r16";
-const HEIGHT_MAP_NEAR_WIDTH: u32 = 16384;
-const HEIGHT_MAP_NEAR_HEIGHT: u32 = 16384;
-const HEIGHT_MAP_FAR_PATH: &str = "assets/untracked/continent Height Max 2048.r16";
-const HEIGHT_MAP_FAR_WIDTH: u32 = 2048;
-const HEIGHT_MAP_FAR_HEIGHT: u32 = 2048;
+const DEFAULT_WORLDMAP_PATH: &str = "assets/worldmaps/continent/manifest.toml";
 const RAYMARCH_START_DISTANCE: f32 = 0.05;
-const TERRAIN_HEIGHT_SCALE: f32 = 255.0 * 2.1;
-const TERRAIN_HORIZONTAL_SCALE: f32 = 0.5;
 const DEFAULT_START_X: f32 = 250.0;
 const DEFAULT_START_Y: f32 = 330.0;
 const DEFAULT_START_HEIGHT: f32 = 150.0;
+const DEFAULT_TILE_CACHE_RADIUS: u32 = 1;
+const MAX_TILE_CACHE_RADIUS: u32 = 2;
+const MAX_SHADER_TILE_SLOTS: usize = 25;
+const R16_BYTES_PER_PIXEL: usize = 2;
+const RGBA_BYTES_PER_PIXEL: usize = 4;
 const DEFAULT_RAY_ITERATION_COUNT: u32 = 700;
 const MAX_RAY_ITERATION_COUNT: u32 = 4096;
 const DEFAULT_NEAR_DDA_DISTANCE: f32 = 512.0;
@@ -118,6 +113,9 @@ struct ShaderParams {
     render: [f32; 4],
     terrain: [f32; 4],
     height_maps: [f32; 4],
+    source_maps: [f32; 4],
+    tile_info: [f32; 4],
+    tile_window: [f32; 4],
     lod_distances: [f32; 4],
     raymarch: [f32; 4],
     near_dda: [f32; 4],
@@ -627,16 +625,194 @@ fn frame_duration_ms(duration: Duration) -> f64 {
 }
 
 struct TerrainMaps {
-    color: Texture<'static>,
-    height_near: Texture<'static>,
+    color_near: Texture<'static>,
+    color_far: Texture<'static>,
+    height_near_atlas: Texture<'static>,
     height_far: Texture<'static>,
     color_sampler: Sampler,
     height_sampler: Sampler,
     terrain_size: [f32; 2],
-    color_size: [f32; 2],
-    height_near_size: [f32; 2],
+    source_size: [f32; 2],
+    height_near_atlas_size: [f32; 2],
     height_far_size: [f32; 2],
-    collision_height: HeightField,
+    color_far_size: [f32; 2],
+    tile_size: u32,
+    tile_padding: u32,
+    stored_tile_size: u32,
+    tile_cache_width: u32,
+    current_window_min: [u32; 2],
+    current_window_max: [u32; 2],
+    height_scale: f32,
+    manifest: WorldmapManifest,
+    worldmap_dir: PathBuf,
+    tile_cache: TerrainTileCache,
+}
+
+impl TerrainMaps {
+    fn collision_height(&self) -> &HeightField {
+        &self.tile_cache.collision_height
+    }
+
+    fn update_tile_cache_for_position(
+        &mut self,
+        gpu: &Device,
+        world_x: f32,
+        world_y: f32,
+    ) -> Result<(), Box<dyn Error>> {
+        let uploads = self.update_tile_window_for_position(gpu, world_x, world_y)?;
+        if uploads == 0 {
+            return Ok(());
+        }
+
+        Ok(())
+    }
+
+    fn update_tile_window_for_position(
+        &mut self,
+        gpu: &Device,
+        world_x: f32,
+        world_y: f32,
+    ) -> Result<usize, Box<dyn Error>> {
+        let [center_x, center_y] = self.tile_for_world_pos(world_x, world_y);
+        let (window_min, window_max) = self.tile_window_bounds_for_center(center_x, center_y);
+
+        if self.current_window_min != window_min || self.current_window_max != window_max {
+            self.tile_cache
+                .collision_height
+                .invalidate_tiles_outside(window_min, window_max);
+            self.current_window_min = window_min;
+            self.current_window_max = window_max;
+        }
+
+        let missing_tiles =
+            self.missing_tiles_by_priority(center_x, center_y, window_min, window_max);
+
+        if missing_tiles.is_empty() {
+            return Ok(0);
+        }
+
+        let upload_count = missing_tiles.len();
+        let command_buffer = gpu.acquire_command_buffer()?;
+        let copy_pass = gpu.begin_copy_pass(&command_buffer)?;
+        for [tile_x, tile_y] in missing_tiles {
+            self.upload_tile_with_copy_pass(gpu, &copy_pass, tile_x, tile_y)?;
+        }
+        gpu.end_copy_pass(copy_pass);
+        command_buffer.submit()?;
+
+        Ok(upload_count)
+    }
+
+    fn upload_tile_with_copy_pass(
+        &mut self,
+        gpu: &Device,
+        copy_pass: &sdl3::gpu::CopyPass,
+        tile_x: u32,
+        tile_y: u32,
+    ) -> Result<(), Box<dyn Error>> {
+        let expected_height_bytes =
+            checked_square_texture_bytes(self.stored_tile_size, R16_BYTES_PER_PIXEL)?;
+        let expected_color_bytes =
+            checked_square_texture_bytes(self.stored_tile_size, RGBA_BYTES_PER_PIXEL)?;
+        let height_path = self
+            .manifest
+            .height_tile_path(&self.worldmap_dir, tile_x, tile_y);
+        let color_path = self
+            .manifest
+            .color_tile_path(&self.worldmap_dir, tile_x, tile_y);
+        let height_bytes = read_exact_bytes(&height_path, expected_height_bytes)?;
+        let color_bytes = read_exact_bytes(&color_path, expected_color_bytes)?;
+        let slot_index = slot_index_for_ring_tile(tile_x, tile_y, self.tile_cache_width);
+        let [slot_x, slot_y] = slot_xy_for_ring_tile(tile_x, tile_y, self.tile_cache_width);
+        let atlas_x = slot_x * self.tile_size;
+        let atlas_y = slot_y * self.tile_size;
+
+        upload_padded_tile_payload(
+            gpu,
+            copy_pass,
+            &self.height_near_atlas,
+            atlas_x,
+            atlas_y,
+            self.tile_size,
+            self.stored_tile_size,
+            self.tile_padding,
+            R16_BYTES_PER_PIXEL,
+            &height_bytes,
+        )?;
+        upload_padded_tile_payload(
+            gpu,
+            copy_pass,
+            &self.color_near,
+            atlas_x,
+            atlas_y,
+            self.tile_size,
+            self.stored_tile_size,
+            self.tile_padding,
+            RGBA_BYTES_PER_PIXEL,
+            &color_bytes,
+        )?;
+        self.tile_cache
+            .collision_height
+            .update_slot(slot_index, tile_x, tile_y, &height_bytes)?;
+
+        Ok(())
+    }
+
+    fn tile_window_bounds_for_center(&self, center_x: u32, center_y: u32) -> ([u32; 2], [u32; 2]) {
+        let radius = (self.tile_cache_width - 1) / 2;
+        let min_x = center_x.saturating_sub(radius);
+        let min_y = center_y.saturating_sub(radius);
+        let max_x = (center_x + radius).min(self.manifest.tile_count_x - 1);
+        let max_y = (center_y + radius).min(self.manifest.tile_count_y - 1);
+
+        ([min_x, min_y], [max_x, max_y])
+    }
+
+    fn missing_tiles_by_priority(
+        &self,
+        center_x: u32,
+        center_y: u32,
+        window_min: [u32; 2],
+        window_max: [u32; 2],
+    ) -> Vec<[u32; 2]> {
+        let mut missing_tiles = Vec::new();
+        for tile_y in window_min[1]..=window_max[1] {
+            for tile_x in window_min[0]..=window_max[0] {
+                let slot_index = slot_index_for_ring_tile(tile_x, tile_y, self.tile_cache_width);
+                if !self.tile_cache.collision_height.slots[slot_index]
+                    .is_loaded_tile(tile_x, tile_y)
+                {
+                    missing_tiles.push([tile_x, tile_y]);
+                }
+            }
+        }
+
+        missing_tiles.sort_by_key(|[tile_x, tile_y]| {
+            center_x.abs_diff(*tile_x) + center_y.abs_diff(*tile_y)
+        });
+        missing_tiles
+    }
+
+    fn tile_for_world_pos(&self, world_x: f32, world_y: f32) -> [u32; 2] {
+        let source_x = (world_x / self.terrain_size[0] * self.manifest.source_width as f32)
+            .clamp(0.0, (self.manifest.source_width - 1) as f32);
+        let source_y = (world_y / self.terrain_size[1] * self.manifest.source_height as f32)
+            .clamp(0.0, (self.manifest.source_height - 1) as f32);
+
+        [
+            (source_x as u32 / self.tile_size).min(self.manifest.tile_count_x - 1),
+            (source_y as u32 / self.tile_size).min(self.manifest.tile_count_y - 1),
+        ]
+    }
+}
+
+fn slot_xy_for_ring_tile(tile_x: u32, tile_y: u32, tile_cache_width: u32) -> [u32; 2] {
+    [tile_x % tile_cache_width, tile_y % tile_cache_width]
+}
+
+fn slot_index_for_ring_tile(tile_x: u32, tile_y: u32, tile_cache_width: u32) -> usize {
+    let [slot_x, slot_y] = slot_xy_for_ring_tile(tile_x, tile_y, tile_cache_width);
+    (slot_y * tile_cache_width + slot_x) as usize
 }
 
 struct RenderTarget {
@@ -646,50 +822,40 @@ struct RenderTarget {
 }
 
 struct HeightField {
-    samples: Vec<u16>,
-    width: u32,
-    height: u32,
+    slots: Vec<TerrainTileSlot>,
+    tile_size: u32,
+    tile_padding: u32,
+    stored_tile_size: u32,
+    source_size: [u32; 2],
     terrain_size: [f32; 2],
+    height_scale: f32,
 }
 
 impl HeightField {
-    fn from_r16_bytes(
-        bytes: &[u8],
-        width: u32,
-        height: u32,
-        terrain_size: [f32; 2],
-    ) -> Result<Self, Box<dyn Error>> {
-        let expected_size = width as usize * height as usize * 2;
-        if bytes.len() != expected_size {
-            return Err(format!(
-                "R16 height field has {} bytes, expected {expected_size} for {width}x{height}",
-                bytes.len()
-            )
-            .into());
-        }
-
-        let samples = bytes
-            .chunks_exact(2)
-            .map(|sample| u16::from_le_bytes([sample[0], sample[1]]))
-            .collect();
+    fn new(manifest: &WorldmapManifest, tile_cache_width: u32) -> Result<Self, Box<dyn Error>> {
+        let stored_tile_size = manifest.stored_tile_size()?;
+        let slot_count = checked_tile_slot_count(tile_cache_width)?;
 
         Ok(Self {
-            samples,
-            width,
-            height,
-            terrain_size,
+            slots: vec![TerrainTileSlot::empty(); slot_count],
+            tile_size: manifest.tile_size,
+            tile_padding: manifest.tile_padding,
+            stored_tile_size,
+            source_size: [manifest.source_width, manifest.source_height],
+            terrain_size: manifest.terrain_size(),
+            height_scale: manifest.height_scale,
         })
     }
 
     fn height_at(&self, world_x: f32, world_y: f32) -> f32 {
-        let sample_x = (world_x / self.terrain_size[0] * self.width as f32)
-            .clamp(0.0, (self.width - 1) as f32);
-        let sample_y = (world_y / self.terrain_size[1] * self.height as f32)
-            .clamp(0.0, (self.height - 1) as f32);
+        let sample_x = (world_x / self.terrain_size[0] * self.source_size[0] as f32)
+            .clamp(0.0, (self.source_size[0] - 1) as f32);
+        let sample_y = (world_y / self.terrain_size[1] * self.source_size[1] as f32)
+            .clamp(0.0, (self.source_size[1] - 1) as f32);
         let x0 = sample_x.floor() as u32;
         let y0 = sample_y.floor() as u32;
-        let x1 = (x0 + 1).min(self.width - 1);
-        let y1 = (y0 + 1).min(self.height - 1);
+        let x1 = (x0 + 1).min(self.source_size[0] - 1);
+        let y1 = (y0 + 1).min(self.source_size[1] - 1);
         let tx = sample_x - x0 as f32;
         let ty = sample_y - y0 as f32;
 
@@ -704,9 +870,100 @@ impl HeightField {
     }
 
     fn sample_height(&self, x: u32, y: u32) -> f32 {
-        let index = y as usize * self.width as usize + x as usize;
-        self.samples[index] as f32 / u16::MAX as f32 * TERRAIN_HEIGHT_SCALE
+        self.sample_raw_height(x, y)
+            .map(|height| height as f32 / u16::MAX as f32 * self.height_scale)
+            .unwrap_or(0.0)
     }
+
+    fn sample_raw_height(&self, x: u32, y: u32) -> Option<u16> {
+        let tile_x = x / self.tile_size;
+        let tile_y = y / self.tile_size;
+        let slot = self
+            .slots
+            .iter()
+            .find(|slot| slot.is_loaded_tile(tile_x, tile_y))?;
+
+        let local_x = x - tile_x * self.tile_size + self.tile_padding;
+        let local_y = y - tile_y * self.tile_size + self.tile_padding;
+        let index = local_y as usize * self.stored_tile_size as usize + local_x as usize;
+        slot.height_samples.get(index).copied()
+    }
+
+    fn update_slot(
+        &mut self,
+        slot_index: usize,
+        tile_x: u32,
+        tile_y: u32,
+        height_bytes: &[u8],
+    ) -> Result<(), Box<dyn Error>> {
+        let expected_bytes =
+            self.stored_tile_size as usize * self.stored_tile_size as usize * R16_BYTES_PER_PIXEL;
+        if height_bytes.len() != expected_bytes {
+            return Err(format!(
+                "height tile {tile_x},{tile_y} has {} bytes, expected {expected_bytes}",
+                height_bytes.len()
+            )
+            .into());
+        }
+
+        let slot = self
+            .slots
+            .get_mut(slot_index)
+            .ok_or_else(|| format!("tile slot {slot_index} is out of range"))?;
+        slot.world_tile_x = tile_x as i32;
+        slot.world_tile_y = tile_y as i32;
+        slot.loaded = true;
+        slot.height_samples.clear();
+        slot.height_samples.extend(
+            height_bytes
+                .chunks_exact(2)
+                .map(|sample| u16::from_le_bytes([sample[0], sample[1]])),
+        );
+
+        Ok(())
+    }
+
+    fn invalidate_tiles_outside(&mut self, window_min: [u32; 2], window_max: [u32; 2]) {
+        for slot in &mut self.slots {
+            if !slot.loaded {
+                continue;
+            }
+            if slot.world_tile_x < window_min[0] as i32
+                || slot.world_tile_y < window_min[1] as i32
+                || slot.world_tile_x > window_max[0] as i32
+                || slot.world_tile_y > window_max[1] as i32
+            {
+                slot.loaded = false;
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TerrainTileSlot {
+    world_tile_x: i32,
+    world_tile_y: i32,
+    loaded: bool,
+    height_samples: Vec<u16>,
+}
+
+impl TerrainTileSlot {
+    fn empty() -> Self {
+        Self {
+            world_tile_x: -1,
+            world_tile_y: -1,
+            loaded: false,
+            height_samples: Vec::new(),
+        }
+    }
+
+    fn is_loaded_tile(&self, tile_x: u32, tile_y: u32) -> bool {
+        self.loaded && self.world_tile_x == tile_x as i32 && self.world_tile_y == tile_y as i32
+    }
+}
+
+struct TerrainTileCache {
+    collision_height: HeightField,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -764,8 +1021,10 @@ impl FpsCounter {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct AppConfig {
+    worldmap: PathBuf,
+    tile_cache_radius: u32,
     ray_iteration_count: u32,
     performance_render_scale: f32,
     present_mode: AppPresentMode,
@@ -829,10 +1088,10 @@ impl DebugVisualMode {
         match self {
             Self::None => "  no debug colors",
             Self::HeightSources => {
-                "  blue: near 16k height map\n  purple: near/far height blend\n  orange: far 2k max-height map\n  red/orange: far 2D backdrop"
+                "  blue: resident near height tile\n  purple: near/far height blend\n  orange: far max-height map\n  red/orange: far 2D backdrop"
             }
             Self::HitMethods => {
-                "  green: near 16k DDA hit\n  cyan: main raymarch hit\n  yellow: large-step probe hit\n  magenta: far 2D backdrop hit"
+                "  green: resident near-tile DDA hit\n  cyan: main raymarch hit\n  yellow: large-step probe hit\n  magenta: far 2D backdrop hit"
             }
             Self::NormalLighting => {
                 "  green: detailed sampled normals\n  yellow: detailed-to-flat lighting blend\n  red: flat far terrain light\n  red/orange: far 2D backdrop flat light"
@@ -862,6 +1121,8 @@ impl AppPresentMode {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            worldmap: PathBuf::from(DEFAULT_WORLDMAP_PATH),
+            tile_cache_radius: DEFAULT_TILE_CACHE_RADIUS,
             ray_iteration_count: DEFAULT_RAY_ITERATION_COUNT,
             performance_render_scale: DEFAULT_PERFORMANCE_RENDER_SCALE,
             present_mode: DEFAULT_PRESENT_MODE,
@@ -929,6 +1190,12 @@ impl AppConfig {
             seen_keys.push(key.to_owned());
 
             match key {
+                "worldmap" => {
+                    config.worldmap = PathBuf::from(parse_config_string(key, value, line_number)?)
+                }
+                "tile_cache_radius" => {
+                    config.tile_cache_radius = parse_config_u32(key, value, line_number)?
+                }
                 "ray_iteration_count" => {
                     config.ray_iteration_count = parse_config_u32(key, value, line_number)?
                 }
@@ -973,6 +1240,14 @@ impl AppConfig {
     }
 
     fn validate(self) -> Result<Self, String> {
+        if self.worldmap.as_os_str().is_empty() {
+            return Err("`worldmap` must not be empty".to_owned());
+        }
+        if self.tile_cache_radius == 0 || self.tile_cache_radius > MAX_TILE_CACHE_RADIUS {
+            return Err(format!(
+                "`tile_cache_radius` must be between 1 and {MAX_TILE_CACHE_RADIUS}"
+            ));
+        }
         if !(1..=MAX_RAY_ITERATION_COUNT).contains(&self.ray_iteration_count) {
             return Err(format!(
                 "`ray_iteration_count` must be between 1 and {MAX_RAY_ITERATION_COUNT}"
@@ -1140,7 +1415,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let target_format = gpu.get_swapchain_texture_format(&window);
     let terrain_pipeline = create_terrain_pipeline(&gpu, target_format)?;
     let upscale_pipeline = create_upscale_pipeline(&gpu, target_format)?;
-    let terrain_maps = load_terrain_maps(&gpu)?;
+    let mut terrain_maps = load_terrain_maps(&gpu, &config)?;
     let upscale_sampler = create_upscale_sampler(&gpu)?;
     let mut render_target = None;
     let mouse = sdl.mouse();
@@ -1190,10 +1465,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 } if !replay_enabled => {
                     camera_mode = match camera_mode {
                         CameraMode::Freecam => {
+                            terrain_maps
+                                .update_tile_cache_for_position(&gpu, camera.x, camera.y)?;
                             enable_gravity_mode(
                                 &mut camera,
                                 &mut player_physics,
-                                &terrain_maps.collision_height,
+                                terrain_maps.collision_height(),
                             );
                             CameraMode::Gravity
                         }
@@ -1243,6 +1520,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 break 'running;
             }
         } else {
+            if camera_mode == CameraMode::Gravity {
+                terrain_maps.update_tile_cache_for_position(&gpu, camera.x, camera.y)?;
+            }
             if camera_mode == CameraMode::Gravity && wheel_delta != 0.0 {
                 let keyboard = events.keyboard_state();
                 let adjust_move_speed = keyboard.is_scancode_pressed(Scancode::LShift)
@@ -1250,7 +1530,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 apply_gravity_wheel_adjustment(
                     &mut camera,
                     &mut player_physics,
-                    &terrain_maps.collision_height,
+                    terrain_maps.collision_height(),
                     wheel_delta,
                     adjust_move_speed,
                 );
@@ -1263,13 +1543,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     &events,
                     &mut camera,
                     &mut player_physics,
-                    &terrain_maps.collision_height,
+                    terrain_maps.collision_height(),
                     dt.as_secs_f32(),
                     mouse_delta,
                     jump_requested,
                 ),
             }
         }
+
+        terrain_maps.update_tile_cache_for_position(&gpu, camera.x, camera.y)?;
 
         let (window_width, window_height) = window.size();
         ensure_render_target(
@@ -1307,14 +1589,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             0,
             &[
                 TextureSamplerBinding::new()
-                    .with_texture(&terrain_maps.color)
+                    .with_texture(&terrain_maps.color_near)
                     .with_sampler(&terrain_maps.color_sampler),
                 TextureSamplerBinding::new()
-                    .with_texture(&terrain_maps.height_near)
+                    .with_texture(&terrain_maps.height_near_atlas)
                     .with_sampler(&terrain_maps.height_sampler),
                 TextureSamplerBinding::new()
                     .with_texture(&terrain_maps.height_far)
                     .with_sampler(&terrain_maps.height_sampler),
+                TextureSamplerBinding::new()
+                    .with_texture(&terrain_maps.color_far)
+                    .with_sampler(&terrain_maps.color_sampler),
             ],
         );
         command_buffer.push_fragment_uniform_data(0, &params);
@@ -1413,7 +1698,7 @@ fn create_terrain_pipeline(
             include_bytes!(concat!(env!("OUT_DIR"), "/voxelspace.frag.spv")),
             ShaderStage::Fragment,
         )
-        .with_samplers(3)
+        .with_samplers(4)
         .with_uniform_buffers(1)
         .with_entrypoint(c"main")
         .build()?;
@@ -1547,103 +1832,140 @@ fn create_upscale_sampler(gpu: &Device) -> Result<Sampler, Box<dyn Error>> {
     )?)
 }
 
-fn load_terrain_maps(gpu: &Device) -> Result<TerrainMaps, Box<dyn Error>> {
+fn load_terrain_maps(gpu: &Device, config: &AppConfig) -> Result<TerrainMaps, Box<dyn Error>> {
+    let manifest = WorldmapManifest::load(&config.worldmap)?;
+    let worldmap_dir = manifest_dir(&config.worldmap)?;
+    let stored_tile_size = manifest.stored_tile_size()?;
+    let tile_cache_width = config.tile_cache_radius * 2 + 1;
+    let atlas_size = checked_atlas_size(tile_cache_width, manifest.tile_size)?;
+    let terrain_size = manifest.terrain_size();
+    let source_size = [manifest.source_width as f32, manifest.source_height as f32];
+    let height_far_size = [
+        manifest.height_far_width as f32,
+        manifest.height_far_height as f32,
+    ];
+    let color_far_size = [
+        manifest.color_far_width as f32,
+        manifest.color_far_height as f32,
+    ];
+
     let copy_commands = gpu.acquire_command_buffer()?;
     let copy_pass = gpu.begin_copy_pass(&copy_commands)?;
 
-    let color_image = image::open(COLOR_MAP_PATH)?;
-    let color_size = [color_image.width() as f32, color_image.height() as f32];
-    let terrain_size = [
-        HEIGHT_MAP_NEAR_WIDTH as f32 * TERRAIN_HORIZONTAL_SCALE,
-        HEIGHT_MAP_NEAR_HEIGHT as f32 * TERRAIN_HORIZONTAL_SCALE,
-    ];
-    let height_near_size = [HEIGHT_MAP_NEAR_WIDTH as f32, HEIGHT_MAP_NEAR_HEIGHT as f32];
-    let height_far_size = [HEIGHT_MAP_FAR_WIDTH as f32, HEIGHT_MAP_FAR_HEIGHT as f32];
-
-    let color =
-        create_texture_from_rgba8(gpu, &copy_pass, color_image, TextureFormat::R8g8b8a8Unorm)?;
-    let height_near_pixels = read_r16_pixels(
-        HEIGHT_MAP_NEAR_PATH,
-        HEIGHT_MAP_NEAR_WIDTH,
-        HEIGHT_MAP_NEAR_HEIGHT,
-    )?;
-    let collision_height = HeightField::from_r16_bytes(
-        &height_near_pixels,
-        HEIGHT_MAP_NEAR_WIDTH,
-        HEIGHT_MAP_NEAR_HEIGHT,
-        terrain_size,
-    )?;
-    let height_near = create_texture_from_bytes(
+    let color_near = create_empty_texture(
         gpu,
-        &copy_pass,
-        HEIGHT_MAP_NEAR_WIDTH,
-        HEIGHT_MAP_NEAR_HEIGHT,
+        atlas_size,
+        atlas_size,
+        TextureFormat::R8g8b8a8Unorm,
+        TextureUsage::SAMPLER,
+    )?;
+    let height_near_atlas = create_empty_texture(
+        gpu,
+        atlas_size,
+        atlas_size,
         TextureFormat::R16Unorm,
-        &height_near_pixels,
+        TextureUsage::SAMPLER,
     )?;
     let height_far = create_texture_from_r16(
         gpu,
         &copy_pass,
-        HEIGHT_MAP_FAR_PATH,
-        HEIGHT_MAP_FAR_WIDTH,
-        HEIGHT_MAP_FAR_HEIGHT,
+        manifest.height_far_path(&worldmap_dir),
+        manifest.height_far_width,
+        manifest.height_far_height,
+    )?;
+    let color_far_pixels = read_rgba_pixels(
+        &manifest.color_far_path(&worldmap_dir),
+        manifest.color_far_width,
+        manifest.color_far_height,
+    )?;
+    let color_far = create_texture_from_bytes(
+        gpu,
+        &copy_pass,
+        manifest.color_far_width,
+        manifest.color_far_height,
+        TextureFormat::R8g8b8a8Unorm,
+        &color_far_pixels,
     )?;
     let color_sampler = gpu.create_sampler(
         SamplerCreateInfo::new()
             .with_min_filter(Filter::Nearest)
             .with_mag_filter(Filter::Nearest)
             .with_mipmap_mode(SamplerMipmapMode::Nearest)
-            .with_address_mode_u(SamplerAddressMode::Repeat)
-            .with_address_mode_v(SamplerAddressMode::Repeat)
-            .with_address_mode_w(SamplerAddressMode::Repeat),
+            .with_address_mode_u(SamplerAddressMode::ClampToEdge)
+            .with_address_mode_v(SamplerAddressMode::ClampToEdge)
+            .with_address_mode_w(SamplerAddressMode::ClampToEdge),
     )?;
     let height_sampler = gpu.create_sampler(
         SamplerCreateInfo::new()
             .with_min_filter(Filter::Nearest)
             .with_mag_filter(Filter::Nearest)
             .with_mipmap_mode(SamplerMipmapMode::Nearest)
-            .with_address_mode_u(SamplerAddressMode::Repeat)
-            .with_address_mode_v(SamplerAddressMode::Repeat)
-            .with_address_mode_w(SamplerAddressMode::Repeat),
+            .with_address_mode_u(SamplerAddressMode::ClampToEdge)
+            .with_address_mode_v(SamplerAddressMode::ClampToEdge)
+            .with_address_mode_w(SamplerAddressMode::ClampToEdge),
     )?;
+    let tile_cache = TerrainTileCache {
+        collision_height: HeightField::new(&manifest, tile_cache_width)?,
+    };
 
-    gpu.end_copy_pass(copy_pass);
-    copy_commands.submit()?;
-
-    Ok(TerrainMaps {
-        color,
-        height_near,
+    let mut terrain_maps = TerrainMaps {
+        color_near,
+        color_far,
+        height_near_atlas,
         height_far,
         color_sampler,
         height_sampler,
         terrain_size,
-        color_size,
-        height_near_size,
+        source_size,
+        height_near_atlas_size: [atlas_size as f32, atlas_size as f32],
         height_far_size,
-        collision_height,
-    })
+        color_far_size,
+        tile_size: manifest.tile_size,
+        tile_padding: manifest.tile_padding,
+        stored_tile_size,
+        tile_cache_width,
+        current_window_min: [u32::MAX, u32::MAX],
+        current_window_max: [u32::MAX, u32::MAX],
+        height_scale: manifest.height_scale,
+        manifest,
+        worldmap_dir,
+        tile_cache,
+    };
+
+    gpu.end_copy_pass(copy_pass);
+    copy_commands.submit()?;
+    terrain_maps.update_tile_window_for_position(gpu, config.start_x, config.start_y)?;
+
+    Ok(terrain_maps)
 }
 
-fn create_texture_from_rgba8(
+fn create_empty_texture(
     gpu: &Device,
-    copy_pass: &sdl3::gpu::CopyPass,
-    image: image::DynamicImage,
+    width: u32,
+    height: u32,
     format: TextureFormat,
+    usage: TextureUsage,
 ) -> Result<Texture<'static>, Box<dyn Error>> {
-    let (width, height) = image.dimensions();
-    let pixels = image.to_rgba8();
-
-    create_texture_from_bytes(gpu, copy_pass, width, height, format, pixels.as_raw())
+    Ok(gpu.create_texture(
+        TextureCreateInfo::new()
+            .with_format(format)
+            .with_type(TextureType::_2D)
+            .with_width(width)
+            .with_height(height)
+            .with_layer_count_or_depth(1)
+            .with_num_levels(1)
+            .with_usage(usage),
+    )?)
 }
 
 fn create_texture_from_r16(
     gpu: &Device,
     copy_pass: &sdl3::gpu::CopyPass,
-    path: &str,
+    path: impl AsRef<Path>,
     width: u32,
     height: u32,
 ) -> Result<Texture<'static>, Box<dyn Error>> {
-    let pixels = read_r16_pixels(path, width, height)?;
+    let pixels = read_r16_pixels(path.as_ref(), width, height)?;
     create_texture_from_bytes(
         gpu,
         copy_pass,
@@ -1654,18 +1976,48 @@ fn create_texture_from_r16(
     )
 }
 
-fn read_r16_pixels(path: &str, width: u32, height: u32) -> Result<Vec<u8>, Box<dyn Error>> {
+fn read_r16_pixels(path: &Path, width: u32, height: u32) -> Result<Vec<u8>, Box<dyn Error>> {
     let pixels = fs::read(path)?;
-    let expected_size = width as usize * height as usize * 2;
+    let expected_size = width as usize * height as usize * R16_BYTES_PER_PIXEL;
     if pixels.len() != expected_size {
         return Err(format!(
-            "{path} has {} bytes, expected {expected_size} for a {width}x{height} R16 heightmap",
+            "{} has {} bytes, expected {expected_size} for a {width}x{height} R16 heightmap",
+            path.display(),
             pixels.len()
         )
         .into());
     }
 
     Ok(pixels)
+}
+
+fn read_rgba_pixels(path: &Path, width: u32, height: u32) -> Result<Vec<u8>, Box<dyn Error>> {
+    let pixels = fs::read(path)?;
+    let expected_size = width as usize * height as usize * RGBA_BYTES_PER_PIXEL;
+    if pixels.len() != expected_size {
+        return Err(format!(
+            "{} has {} bytes, expected {expected_size} for a {width}x{height} RGBA8 map",
+            path.display(),
+            pixels.len()
+        )
+        .into());
+    }
+
+    Ok(pixels)
+}
+
+fn read_exact_bytes(path: &Path, expected_size: usize) -> Result<Vec<u8>, Box<dyn Error>> {
+    let bytes = fs::read(path)?;
+    if bytes.len() != expected_size {
+        return Err(format!(
+            "{} has {} bytes, expected {expected_size}",
+            path.display(),
+            bytes.len()
+        )
+        .into());
+    }
+
+    Ok(bytes)
 }
 
 fn create_texture_from_bytes(
@@ -1715,6 +2067,87 @@ fn create_texture_from_bytes(
     );
 
     Ok(texture)
+}
+
+fn upload_padded_tile_payload(
+    gpu: &Device,
+    copy_pass: &sdl3::gpu::CopyPass,
+    texture: &Texture,
+    x: u32,
+    y: u32,
+    tile_size: u32,
+    stored_tile_size: u32,
+    tile_padding: u32,
+    bytes_per_pixel: usize,
+    pixels: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    let size_bytes = u32::try_from(pixels.len())
+        .map_err(|_| "tile upload is too large for SDL transfer buffer size")?;
+    let row_offset_pixels = tile_padding
+        .checked_mul(stored_tile_size)
+        .and_then(|offset| offset.checked_add(tile_padding))
+        .ok_or("tile payload offset overflows u32")?;
+    let offset = row_offset_pixels as usize * bytes_per_pixel;
+    let offset = u32::try_from(offset).map_err(|_| "tile payload offset overflows u32")?;
+    let transfer_buffer = gpu
+        .create_transfer_buffer()
+        .with_size(size_bytes)
+        .with_usage(TransferBufferUsage::UPLOAD)
+        .build()?;
+
+    let mut map = transfer_buffer.map::<u8>(gpu, false);
+    map.mem_mut().copy_from_slice(pixels);
+    map.unmap();
+
+    copy_pass.upload_to_gpu_texture(
+        TextureTransferInfo::new()
+            .with_transfer_buffer(&transfer_buffer)
+            .with_offset(offset)
+            .with_pixels_per_row(stored_tile_size)
+            .with_rows_per_layer(stored_tile_size),
+        TextureRegion::new()
+            .with_texture(texture)
+            .with_layer(0)
+            .with_x(x)
+            .with_y(y)
+            .with_width(tile_size)
+            .with_height(tile_size)
+            .with_depth(1),
+        false,
+    );
+
+    Ok(())
+}
+
+fn checked_atlas_size(tile_cache_width: u32, stored_tile_size: u32) -> Result<u32, Box<dyn Error>> {
+    tile_cache_width
+        .checked_mul(stored_tile_size)
+        .ok_or_else(|| "tile atlas dimensions overflow u32".into())
+}
+
+fn checked_tile_slot_count(tile_cache_width: u32) -> Result<usize, Box<dyn Error>> {
+    let count = tile_cache_width
+        .checked_mul(tile_cache_width)
+        .ok_or("tile cache slot count overflows u32")?;
+    let count = usize::try_from(count)?;
+
+    if count > MAX_SHADER_TILE_SLOTS {
+        return Err(
+            format!("tile cache needs {count} slots; max is {MAX_SHADER_TILE_SLOTS}").into(),
+        );
+    }
+
+    Ok(count)
+}
+
+fn checked_square_texture_bytes(
+    size: u32,
+    bytes_per_pixel: usize,
+) -> Result<usize, Box<dyn Error>> {
+    (size as usize)
+        .checked_mul(size as usize)
+        .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
+        .ok_or_else(|| "square texture byte size overflows usize".into())
 }
 
 fn update_camera_look(
@@ -1965,19 +2398,37 @@ fn shader_params(
             width as f32,
             height as f32,
             camera.vertical_fov,
-            TERRAIN_HEIGHT_SCALE,
+            terrain_maps.height_scale,
         ],
         terrain: [
             terrain_maps.terrain_size[0],
             terrain_maps.terrain_size[1],
-            terrain_maps.color_size[0],
-            terrain_maps.color_size[1],
+            terrain_maps.manifest.tile_count_x as f32,
+            terrain_maps.manifest.tile_count_y as f32,
         ],
         height_maps: [
-            terrain_maps.height_near_size[0],
-            terrain_maps.height_near_size[1],
+            terrain_maps.height_near_atlas_size[0],
+            terrain_maps.height_near_atlas_size[1],
             terrain_maps.height_far_size[0],
             terrain_maps.height_far_size[1],
+        ],
+        source_maps: [
+            terrain_maps.source_size[0],
+            terrain_maps.source_size[1],
+            terrain_maps.color_far_size[0],
+            terrain_maps.color_far_size[1],
+        ],
+        tile_info: [
+            terrain_maps.tile_size as f32,
+            terrain_maps.tile_cache_width as f32,
+            (terrain_maps.current_window_min[0] % terrain_maps.tile_cache_width) as f32,
+            (terrain_maps.current_window_min[1] % terrain_maps.tile_cache_width) as f32,
+        ],
+        tile_window: [
+            terrain_maps.current_window_min[0] as f32,
+            terrain_maps.current_window_min[1] as f32,
+            terrain_maps.current_window_max[0] as f32,
+            terrain_maps.current_window_max[1] as f32,
         ],
         lod_distances: [
             config.height_lod_blend_start,
@@ -2204,30 +2655,44 @@ mod tests {
     #[test]
     fn buckets_replay_stats_every_ten_frames() {
         let mut stats = ReplayStats::new();
-        for frame in 0..11 {
+        let total_frames = REPLAY_SUMMARY_WARMUP_FRAMES + REPLAY_STATS_BUCKET_FRAMES + 1;
+        for frame in 0..total_frames {
             stats.record_frame(frame, Duration::from_millis(frame + 1));
         }
 
-        assert_eq!(stats.submitted_frame_count, 11);
-        assert_eq!(stats.frame_count, 10);
-        assert_eq!(stats.ignored_summary_frame_count(), 1);
-        assert_eq!(stats.min, Some(Duration::from_millis(2)));
-        assert_eq!(stats.max, Some(Duration::from_millis(11)));
-        assert_eq!(stats.buckets.len(), 2);
+        assert_eq!(stats.submitted_frame_count, total_frames);
+        assert_eq!(stats.frame_count, REPLAY_STATS_BUCKET_FRAMES + 1);
+        assert_eq!(
+            stats.ignored_summary_frame_count(),
+            REPLAY_SUMMARY_WARMUP_FRAMES
+        );
+        assert_eq!(
+            stats.min,
+            Some(Duration::from_millis(REPLAY_SUMMARY_WARMUP_FRAMES + 1))
+        );
+        assert_eq!(stats.max, Some(Duration::from_millis(total_frames)));
+        assert_eq!(stats.buckets.len(), 3);
         assert_eq!(stats.buckets[0].replay_frame_start, 0);
         assert_eq!(stats.buckets[0].replay_frame_end, 9);
         assert_eq!(stats.buckets[0].frame_count, 10);
         assert_eq!(stats.buckets[0].min, Duration::from_millis(1));
         assert_eq!(stats.buckets[0].max, Duration::from_millis(10));
         assert_eq!(stats.buckets[1].replay_frame_start, 10);
-        assert_eq!(stats.buckets[1].replay_frame_end, 10);
-        assert_eq!(stats.buckets[1].frame_count, 1);
+        assert_eq!(stats.buckets[1].replay_frame_end, 19);
+        assert_eq!(stats.buckets[1].frame_count, 10);
+        assert_eq!(stats.buckets[1].min, Duration::from_millis(11));
+        assert_eq!(stats.buckets[1].max, Duration::from_millis(20));
+        assert_eq!(stats.buckets[2].replay_frame_start, 20);
+        assert_eq!(stats.buckets[2].replay_frame_end, 20);
+        assert_eq!(stats.buckets[2].frame_count, 1);
     }
 
     #[test]
     fn parses_config_overrides_and_keeps_defaults() {
         let config = AppConfig::parse(
             r#"
+            worldmap = "assets/worldmaps/test/manifest.toml"
+            tile_cache_radius = 1
             ray_iteration_count = 200
             performance_render_scale = 0.4
             present_mode = "mailbox"
@@ -2244,6 +2709,11 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(
+            config.worldmap,
+            PathBuf::from("assets/worldmaps/test/manifest.toml")
+        );
+        assert_eq!(config.tile_cache_radius, 1);
         assert_eq!(config.ray_iteration_count, 200);
         assert_eq!(config.performance_render_scale, 0.4);
         assert_eq!(config.present_mode, AppPresentMode::Mailbox);
@@ -2353,10 +2823,47 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("render_debug_visuals"));
+
+        let error = AppConfig::parse(
+            r#"
+            tile_cache_radius = 99
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("tile_cache_radius"));
+
+        let error = AppConfig::parse(
+            r#"
+            worldmap = ""
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("worldmap"));
     }
 
     #[test]
     fn samples_height_field_with_bilinear_filtering() {
+        let manifest = WorldmapManifest {
+            name: "test".to_owned(),
+            source_width: 2,
+            source_height: 2,
+            horizontal_scale: 1.0,
+            height_scale: 100.0,
+            tile_size: 2,
+            tile_padding: 0,
+            tile_count_x: 1,
+            tile_count_y: 1,
+            height_format: "r16le".to_owned(),
+            height_near_path: "height/near".to_owned(),
+            height_far_path: "height/far/max_1.r16".to_owned(),
+            height_far_width: 1,
+            height_far_height: 1,
+            color_format: "rgba8".to_owned(),
+            color_near_path: "color/near".to_owned(),
+            color_far_path: "color/far/overview_1.rgba".to_owned(),
+            color_far_width: 1,
+            color_far_height: 1,
+        };
         let bytes = [
             0_u16.to_le_bytes(),
             u16::MAX.to_le_bytes(),
@@ -2364,10 +2871,11 @@ mod tests {
             0_u16.to_le_bytes(),
         ]
         .concat();
-        let height_field = HeightField::from_r16_bytes(&bytes, 2, 2, [2.0, 2.0]).unwrap();
+        let mut height_field = HeightField::new(&manifest, 1).unwrap();
+        height_field.update_slot(0, 0, 0, &bytes).unwrap();
 
         assert_eq!(height_field.height_at(0.0, 0.0), 0.0);
-        assert!((height_field.height_at(0.5, 0.5) - TERRAIN_HEIGHT_SCALE * 0.5).abs() < 0.001);
-        assert!((height_field.height_at(2.0, 0.0) - TERRAIN_HEIGHT_SCALE).abs() < 0.001);
+        assert!((height_field.height_at(0.5, 0.5) - 50.0).abs() < 0.001);
+        assert!((height_field.height_at(2.0, 0.0) - 100.0).abs() < 0.001);
     }
 }

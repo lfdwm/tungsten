@@ -1,14 +1,18 @@
 #version 450
 
-layout(set = 2, binding = 0) uniform sampler2D color_map;
-layout(set = 2, binding = 1) uniform sampler2D height_near_map;
+layout(set = 2, binding = 0) uniform sampler2D color_near_map;
+layout(set = 2, binding = 1) uniform sampler2D height_near_atlas;
 layout(set = 2, binding = 2) uniform sampler2D height_far_map;
+layout(set = 2, binding = 3) uniform sampler2D color_far_map;
 
 layout(set = 3, binding = 0) uniform Params {
     vec4 camera;
     vec4 render;
     vec4 terrain;
     vec4 height_maps;
+    vec4 source_maps;
+    vec4 tile_info;
+    vec4 tile_window;
     vec4 lod_distances;
     vec4 raymarch;
     vec4 near_dda;
@@ -51,16 +55,109 @@ const int HIT_METHOD_LARGE_STEP_PROBE = 3;
 const int HIT_METHOD_BACKDROP = 4;
 
 float height_cell(sampler2D height_map, vec2 world_pos, vec2 map_size) {
-    vec2 terrain_uv = world_pos / terrain.xy;
+    vec2 terrain_uv = clamp(world_pos / terrain.xy, vec2(0.0), vec2(1.0));
     ivec2 size = ivec2(map_size);
     ivec2 cell = clamp(ivec2(floor(terrain_uv * map_size)), ivec2(0), size - ivec2(1));
     return texelFetch(height_map, cell, 0).r * render.w;
 }
 
-float height_near_cell(ivec2 cell) {
-    ivec2 size = ivec2(height_maps.xy);
-    ivec2 clamped_cell = clamp(cell, ivec2(0), size - ivec2(1));
-    return texelFetch(height_near_map, clamped_cell, 0).r * render.w;
+ivec2 source_size() {
+    return ivec2(source_maps.xy);
+}
+
+int tile_size() {
+    return int(tile_info.x + 0.5);
+}
+
+int tile_cache_width() {
+    return int(tile_info.y + 0.5);
+}
+
+ivec2 tile_slot_origin() {
+    return ivec2(tile_info.zw + vec2(0.5));
+}
+
+ivec2 source_cell_for_world(vec2 world_pos) {
+    vec2 terrain_uv = clamp(world_pos / terrain.xy, vec2(0.0), vec2(1.0));
+    ivec2 size = source_size();
+    return clamp(ivec2(floor(terrain_uv * vec2(size))), ivec2(0), size - ivec2(1));
+}
+
+ivec2 window_min_tile() {
+    return ivec2(tile_window.xy + vec2(0.5));
+}
+
+ivec2 window_max_tile() {
+    return ivec2(tile_window.zw + vec2(0.5));
+}
+
+bool source_cell_is_resident(ivec2 cell) {
+    int size = tile_size();
+    ivec2 min_cell = window_min_tile() * size;
+    ivec2 max_cell = (window_max_tile() + ivec2(1)) * size - ivec2(1);
+    return cell.x >= min_cell.x
+        && cell.y >= min_cell.y
+        && cell.x <= max_cell.x
+        && cell.y <= max_cell.y;
+}
+
+ivec2 ring_atlas_cell_for_source_cell(ivec2 cell) {
+    int size = tile_size();
+    int atlas_size = tile_cache_width() * size;
+    ivec2 atlas_cell = cell - window_min_tile() * size + tile_slot_origin() * size;
+    if (atlas_cell.x >= atlas_size) {
+        atlas_cell.x -= atlas_size;
+    }
+    if (atlas_cell.y >= atlas_size) {
+        atlas_cell.y -= atlas_size;
+    }
+    return atlas_cell;
+}
+
+bool near_height_cell(ivec2 cell, out float height) {
+    ivec2 clamped_cell = clamp(cell, ivec2(0), source_size() - ivec2(1));
+    if (!source_cell_is_resident(clamped_cell)) {
+        height = 0.0;
+        return false;
+    }
+
+    ivec2 atlas_cell = ring_atlas_cell_for_source_cell(clamped_cell);
+    height = texelFetch(height_near_atlas, atlas_cell, 0).r * render.w;
+    return true;
+}
+
+bool near_height_at(vec2 world_pos, out float height) {
+    return near_height_cell(source_cell_for_world(world_pos), height);
+}
+
+vec3 far_color_at(vec2 world_pos) {
+    return textureLod(color_far_map, clamp(world_pos / terrain.xy, vec2(0.0), vec2(1.0)), 0.0).rgb;
+}
+
+bool near_color_at(vec2 world_pos, out vec3 color) {
+    vec2 source_pos = clamp(
+        world_pos / terrain.xy * source_maps.xy,
+        vec2(0.0),
+        source_maps.xy - vec2(1.0)
+    );
+    ivec2 source_cell = ivec2(floor(source_pos));
+    if (!source_cell_is_resident(source_cell)) {
+        color = vec3(0.0);
+        return false;
+    }
+
+    float atlas_size = tile_info.y * tile_info.x;
+    vec2 atlas_pos = source_pos - vec2(window_min_tile() * tile_size())
+        + tile_info.zw * tile_info.x
+        + vec2(0.5);
+    if (atlas_pos.x >= atlas_size) {
+        atlas_pos.x -= atlas_size;
+    }
+    if (atlas_pos.y >= atlas_size) {
+        atlas_pos.y -= atlas_size;
+    }
+    color = textureLod(color_near_map, atlas_pos / height_maps.xy, 0.0).rgb;
+    return true;
 }
 
 float height_lod_blend(float horizontal_dist) {
@@ -68,26 +165,37 @@ float height_lod_blend(float horizontal_dist) {
 }
 
 float height_at(vec2 world_pos, float lod_blend) {
-    if (lod_blend <= 0.0) {
-        return height_cell(height_near_map, world_pos, height_maps.xy);
-    }
     if (lod_blend >= 1.0) {
         return height_cell(height_far_map, world_pos, height_maps.zw);
     }
 
-    float near_height = height_cell(height_near_map, world_pos, height_maps.xy);
+    float near_height;
+    bool has_near_height = near_height_at(world_pos, near_height);
+    if (lod_blend <= 0.0 && has_near_height) {
+        return near_height;
+    }
+
     float far_height = height_cell(height_far_map, world_pos, height_maps.zw);
+    if (!has_near_height) {
+        return far_height;
+    }
+
     return mix(near_height, far_height, lod_blend);
 }
 
 float height_sample_radius(float lod_blend) {
-    float near_cell_size = terrain.x / height_maps.x;
+    float near_cell_size = terrain.x / source_maps.x;
     float far_cell_size = terrain.x / height_maps.z;
     return mix(near_cell_size, far_cell_size, lod_blend);
 }
 
 vec3 color_at(vec2 world_pos) {
-    return textureLod(color_map, world_pos / terrain.xy, 0.0).rgb;
+    vec3 near_color;
+    if (near_color_at(world_pos, near_color)) {
+        return near_color;
+    }
+
+    return far_color_at(world_pos);
 }
 
 vec3 sky_color(float ray_y) {
@@ -188,16 +296,18 @@ int debug_mode() {
     return int(debug.x + 0.5);
 }
 
-vec3 debug_height_source_color(float horizontal_dist, bool backdrop_hit) {
+vec3 debug_height_source_color(vec2 world_pos, float horizontal_dist, bool backdrop_hit) {
     if (backdrop_hit) {
         return vec3(1.0, 0.20, 0.05);
     }
 
+    float near_height;
+    bool has_near_height = near_height_at(world_pos, near_height);
     float lod_blend = height_lod_blend(horizontal_dist);
-    if (lod_blend <= 0.001) {
+    if (has_near_height && lod_blend <= 0.001) {
         return vec3(0.05, 0.35, 1.0);
     }
-    if (lod_blend >= 0.999) {
+    if (!has_near_height || lod_blend >= 0.999) {
         return vec3(1.0, 0.70, 0.05);
     }
 
@@ -237,10 +347,10 @@ vec3 debug_normal_lighting_color(float horizontal_dist, bool backdrop_hit) {
     return vec3(1.0, 0.85, 0.05);
 }
 
-vec3 debug_terrain_color(float horizontal_dist, int hit_method, bool backdrop_hit) {
+vec3 debug_terrain_color(vec2 world_pos, float horizontal_dist, int hit_method, bool backdrop_hit) {
     int mode = debug_mode();
     if (mode == DEBUG_HEIGHT_SOURCES) {
-        return debug_height_source_color(horizontal_dist, backdrop_hit);
+        return debug_height_source_color(world_pos, horizontal_dist, backdrop_hit);
     }
     if (mode == DEBUG_HIT_METHODS) {
         return debug_hit_method_color(hit_method);
@@ -253,7 +363,7 @@ vec3 debug_terrain_color(float horizontal_dist, int hit_method, bool backdrop_hi
 }
 
 float raymarch_step_size(float horizontal_dist, float lod_blend) {
-    float near_cell_size = terrain.x / height_maps.x;
+    float near_cell_size = terrain.x / source_maps.x;
     float close_step = near_cell_size * CLOSE_TERRAIN_STEP_CELL_FACTOR;
     float near_step = 0.55 + horizontal_dist * 0.0055;
     float close_step_blend = smoothstep(
@@ -349,7 +459,7 @@ bool should_probe_large_step(float horizontal_step, float lod_blend, float previ
 }
 
 bool near_cell_in_bounds(ivec2 cell) {
-    ivec2 size = ivec2(height_maps.xy);
+    ivec2 size = source_size();
     return cell.x >= 0 && cell.y >= 0 && cell.x < size.x && cell.y < size.y;
 }
 
@@ -387,7 +497,7 @@ bool raycast_near_height_cells(
         return false;
     }
 
-    vec2 cell_size = terrain.xy / height_maps.xy;
+    vec2 cell_size = terrain.xy / source_maps.xy;
     vec2 start_pos = origin.xz + ray.xz * (start_t + NEAR_DDA_T_EPSILON);
     ivec2 cell = ivec2(floor(start_pos / cell_size));
 
@@ -406,7 +516,10 @@ bool raycast_near_height_cells(
     float delta_x_t = step_cell.x == 0 ? 1.0e30 : cell_size.x / abs(ray.x);
     float delta_z_t = step_cell.y == 0 ? 1.0e30 : cell_size.y / abs(ray.z);
     float current_t = start_t;
-    float current_height = height_near_cell(cell);
+    float current_height;
+    if (!near_height_cell(cell, current_height)) {
+        return false;
+    }
 
     for (int i = 0; i < MAX_NEAR_DDA_STEPS; i++) {
         if (i >= dda_max_steps) {
@@ -452,7 +565,11 @@ bool raycast_near_height_cells(
         }
 
         float boundary_y = origin.y + ray.y * next_t;
-        float next_height = height_near_cell(next_cell);
+        float next_height;
+        if (!near_height_cell(next_cell, next_height)) {
+            exit_t = next_t;
+            return false;
+        }
         float side_height = max(current_height, next_height);
         if (boundary_y <= side_height) {
             set_terrain_hit(origin, ray, ray_horizontal, next_t, hit_pos, hit_dist, hit_horizontal_dist);
@@ -669,7 +786,7 @@ void main() {
         float fog = smoothstep(raymarch.z * 0.62, raymarch.z, hit_horizontal_dist);
         vec3 color = mix(terrain_color(hit_pos, hit_horizontal_dist), sky, fog * 0.86);
         if (mode != DEBUG_NONE) {
-            vec3 debug_color = debug_terrain_color(hit_horizontal_dist, hit_method, false);
+            vec3 debug_color = debug_terrain_color(hit_pos.xz, hit_horizontal_dist, hit_method, false);
             color = mix(color, debug_color, DEBUG_COLOR_BLEND);
         }
         out_color = vec4(color, 1.0);
@@ -685,7 +802,7 @@ void main() {
         float fog = smoothstep(raymarch.z * 0.45, raymarch.z, hit_horizontal_dist);
         vec3 color = mix(backdrop_terrain_color(hit_pos.xz), sky, fog * 0.9);
         if (mode != DEBUG_NONE) {
-            vec3 debug_color = debug_terrain_color(hit_horizontal_dist, HIT_METHOD_BACKDROP, true);
+            vec3 debug_color = debug_terrain_color(hit_pos.xz, hit_horizontal_dist, HIT_METHOD_BACKDROP, true);
             color = mix(color, debug_color, DEBUG_COLOR_BLEND);
         }
         out_color = vec4(color, 1.0);

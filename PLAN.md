@@ -13,7 +13,7 @@ The current full-texture shader path does not need to be kept for backwards comp
 - Near tile payload size: `1024x1024`.
 - Tile padding: `2` pixels copied from neighboring source data.
 - Stored tile size: `1028x1028` when padding is included.
-- Runtime resident near cache: `5x5` tiles around the player.
+- Runtime resident near cache: initially planned as `5x5`; implemented default is `3x3` after replay benchmarking showed lower upload spikes while still covering the configured near-DDA distance. `5x5` remains supported through `tile_cache_radius = 2`.
 - Far height map: `2048x2048` max-height R16.
 - Far color overview: `4096x4096` downsampled color map.
 - Terrain horizontal and height scale are world metadata stored in the generated manifest.
@@ -156,7 +156,7 @@ At startup:
 3. Load far color overview into one RGBA8 texture.
 4. Allocate fixed-size near height atlas.
 5. Allocate fixed-size near color atlas.
-6. Load the initial `5x5` tile window centered around the configured start position.
+6. Load the initial resident tile window centered around the configured start position.
 7. Build the CPU collision tile cache for the current tile and immediate neighbors.
 
 For `1024x1024` payload tiles and a `5x5` resident cache:
@@ -176,7 +176,7 @@ Either layout can work. Storing padded tiles directly is simpler. Packing only p
 
 ## Resident Tile Cache
 
-Use a fixed `5x5` rolling cache around the player. The cache should keep metadata for each atlas slot:
+Use a fixed rolling cache around the player. The initial design target was `5x5`; the implemented default is `3x3`, with `5x5` still available through `tile_cache_radius = 2`. The cache should keep metadata for each atlas slot:
 
 ```text
 slot_x
@@ -191,18 +191,13 @@ last_used_frame
 Use ring placement:
 
 ```text
-slot_x = world_tile_x mod 5
-slot_y = world_tile_y mod 5
+slot_x = world_tile_x mod cache_width
+slot_y = world_tile_y mod cache_width
 ```
 
 When the player crosses into a new tile, only newly visible rows or columns need to be loaded and uploaded. Existing tiles remain in place. The renderer should never shift or copy the whole atlas.
 
-The shader must be able to tell whether the tile in a slot is actually the requested world tile. A modulo slot can contain stale data from another world coordinate.
-
-Pass this as a small lookup resource, such as:
-
-- a tiny integer texture with resident world tile coordinates, or
-- a uniform array if SDL GPU and shader limits make that straightforward.
+The current implementation keeps every tile in the resident window loaded before rendering that window. With that invariant, the shader only needs the resident source-cell bounds and the atlas-origin slot. If async loading later allows partially resident windows, add a cheap residency lookup such as a bitmask, tiny integer texture, or uniform array.
 
 For a `5x5` cache, either is fine.
 
@@ -237,7 +232,8 @@ height_near_atlas: fixed resident tile atlas
 color_near_atlas: fixed resident tile atlas
 height_far_map: global far max-height texture
 color_far_map: global far overview texture
-tile_residency: small lookup for atlas slots
+tile_window: resident source-cell bounds
+tile_info: tile size, cache width, atlas-origin slot
 ```
 
 Add helper functions around tile resolution:
@@ -312,13 +308,13 @@ Use worker threads for disk reads and CPU decode. GPU texture uploads should hap
 
 Frame pacing rules:
 
-- Cap how many tile uploads can happen per frame.
+- Keep upload bursts small by uploading only newly visible ring slots.
 - Prioritize tiles closest to the player.
 - Load the tile containing the player first.
 - Then load the cross or ring of nearby tiles.
 - Avoid blocking the render loop except for collision-critical current-tile data.
 
-The first version can be simpler and synchronous, but the design should keep the upload boundary clear so async loading can be added without rewriting the renderer.
+The first implementation is synchronous and uploads the newly visible strip together when the resident window changes. A per-frame upload cap was tested with shader-visible missing slots, but that path was slower in replay benchmarks because the residency checks landed in the shader hot path. Revisit per-frame caps with an async loader and a cheaper residency representation if tile bursts become visible.
 
 ## Config Impact
 
@@ -374,8 +370,8 @@ It should describe:
 - Tiled near terrain data.
 - Fixed resident atlas.
 - Far map fallback.
-- Tile residency lookup.
-- How LOD blending works with missing near tiles.
+- Ring atlas coordinate mapping.
+- How LOD blending works outside the resident near window.
 - How collision uses tiled height data.
 - Updated debug visual meanings if the debug modes change.
 
@@ -389,11 +385,11 @@ Update `README.md` with the short command examples only. Keep detailed explanati
 4. Add documentation for the worldmap package format and pipeline usage.
 5. Change runtime startup to load the worldmap manifest and far maps.
 6. Allocate near height/color atlases.
-7. Implement initial synchronous `5x5` tile loading around the start position.
+7. Implement initial synchronous resident tile loading around the start position.
 8. Update shader bindings and helper functions for tiled sampling.
 9. Update `raycast_near_height_cells()` for resident tile lookup.
 10. Replace full CPU collision height field with a tiled collision cache.
-11. Add movement-triggered tile streaming and per-frame upload caps.
+11. Add movement-triggered ring-slot tile streaming. Per-frame upload caps are deferred until an async loader can keep the shader path cheap.
 12. Update `docs/terrain-renderer.md`.
 13. Tune tile size, cache radius, and upload budget based on measurements.
 
@@ -403,8 +399,8 @@ Update `README.md` with the short command examples only. Keep detailed explanati
 - Tile-edge seams are likely if padding or coordinate mapping is even slightly wrong.
 - GPU upload spikes can hurt frame pacing if too many tiles upload in one frame.
 - PNG decode may be too slow for runtime color tiles.
-- Near DDA can become incorrect if it crosses into stale or missing atlas slots.
-- Collision must not sample missing near data under the player.
+- Near DDA must exit cleanly when it crosses outside the resident near window.
+- Collision must keep near data resident under the player.
 
 ## Initial Success Criteria
 

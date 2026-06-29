@@ -5,6 +5,9 @@
 Runtime rendering knobs live in `config.toml`:
 
 ```toml
+worldmap = "assets/worldmaps/continent/manifest.toml"
+tile_cache_radius = 1
+
 ray_iteration_count = 700
 performance_render_scale = 0.5
 present_mode = "vsync" # "vsync", "immediate", or "mailbox"
@@ -24,7 +27,7 @@ normal_detail_blend_start = 500.0
 normal_detail_blend_end = 1000.0
 ```
 
-The config is loaded once at startup. Missing keys fall back to the built-in defaults. Use `present_mode = "immediate"` for raw throughput measurement, `present_mode = "mailbox"` for low-latency no-tear presentation where supported, or `present_mode = "vsync"` for display-paced presentation. Set `max_framerate` above `0.0` to add a CPU-side frame cap. Set `render_debug_visuals = true` to enable cycling terrain debug views with `F3`.
+The config is loaded once at startup. Missing keys fall back to the built-in defaults. `worldmap` points at a generated package manifest; see [docs/worldmaps.md](docs/worldmaps.md). Use `present_mode = "immediate"` for raw throughput measurement, `present_mode = "mailbox"` for low-latency no-tear presentation where supported, or `present_mode = "vsync"` for display-paced presentation. Set `max_framerate` above `0.0` to add a CPU-side frame cap. Set `render_debug_visuals = true` to enable cycling terrain debug views with `F3`.
 
 ## Controls
 
@@ -45,6 +48,23 @@ cargo run --release -- --replay-camera recordings/camera-0000000000000.tsv
 Replay honors `present_mode` and `max_framerate` from `config.toml`, interpolates between recorded samples, exits after the last sample, and writes FPS statistics to stdout. The stdout summary ignores the first replay frames as warmup. It also writes a graph-friendly CSV under `/tmp/tungsten-replay-fps-*.csv` with average/min/max FPS buckets for each 10 replay frames.
 
 ## Tools
+
+Generate a tiled worldmap package:
+
+```sh
+cargo run --release --bin build_worldmap -- \
+  --height-input "assets/untracked/continent Height Output 16384.r16" \
+  --height-size 16384x16384 \
+  --color-input "assets/untracked/continent Material Output 16384_diffuse.png" \
+  --output assets/worldmaps/continent \
+  --tile-size 1024 \
+  --tile-padding 2 \
+  --far-height-size 2048x2048 \
+  --far-color-size 4096x4096 \
+  --horizontal-scale 0.5 \
+  --height-scale 535.5 \
+  --name continent
+```
 
 Generate a conservative max-height R16 mip:
 

@@ -1,4 +1,7 @@
 # Runtime terrain rendering knobs.
+worldmap = "assets/worldmaps/continent/manifest.toml"
+tile_cache_radius = 1
+
 # ray_iteration_count = 700
 ray_iteration_count = 100
 performance_render_scale = 0.5

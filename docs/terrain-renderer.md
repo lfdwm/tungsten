@@ -13,7 +13,7 @@ The main implementation points are:
 
 ```mermaid
 flowchart TD
-    CPU[main.rs] --> LoadMaps[Load color and height maps]
+    CPU[main.rs] --> LoadMaps[Load worldmap manifest, far maps, and near tile atlases]
     LoadMaps --> GPUTextures[GPU textures and samplers]
     CPU --> Config[config.toml]
     CPU --> Uniforms[ShaderParams uniform buffer]
@@ -29,26 +29,36 @@ The app renders the terrain into an offscreen color target whose size is control
 
 ## Terrain Assets
 
-The terrain is defined by one color map and two height maps.
+The renderer loads a generated worldmap package selected by `config.toml`:
 
-| Purpose | File | Format | Size in code | Use |
-| --- | --- | --- | --- | --- |
-| Color map | `assets/untracked/continent Material Output 8192_diffuse.png` | PNG loaded as RGBA8 | Read from the image | Base terrain color |
-| Near height map | `assets/untracked/continent Height Output 16384.r16` | 16-bit raw little-endian R16 | `16384x16384` | Detailed terrain, near ray hits, CPU collision |
-| Far height map | `assets/untracked/continent Height Max 2048.r16` | 16-bit raw little-endian R16 | `2048x2048` | Far terrain LOD and backdrop |
-
-The near and far height maps are uploaded as `R16Unorm` GPU textures. A sampled value of `1.0` corresponds to `TERRAIN_HEIGHT_SCALE`, currently:
-
-```text
-255.0 * 2.1 = 535.5 world units
+```toml
+worldmap = "assets/worldmaps/continent/manifest.toml"
 ```
 
-The world width and depth are derived from the near height map:
+The package format is documented in [worldmaps.md](worldmaps.md). Runtime terrain data is split into always-resident far maps and a rolling near-tile cache.
+
+| Purpose | Format | Default size | Runtime use |
+| --- | --- | --- | --- |
+| Near height tiles | Padded raw R16 tiles | `1028x1028` stored pixels per tile | Detailed close terrain, near DDA, CPU collision |
+| Near color tiles | Padded raw RGBA8 tiles | `1028x1028` stored pixels per tile | Detailed color when the tile is resident |
+| Far height map | Max-height raw R16 | `2048x2048` | Conservative far terrain LOD and backdrop |
+| Far color overview | Downsampled raw RGBA8 | `4096x4096` | Color fallback for far or unloaded near terrain |
+
+With `tile_cache_radius = 1`, the runtime keeps a `3x3` resident cache of near tiles. The default `1024` payload tiles are stored in `3072x3072` near height and near color atlas textures. Generated tile padding is still used while extracting payloads and for CPU collision data. After startup, moving across a tile boundary uploads the newly visible row or column into ring atlas slots while shared tiles stay resident.
+
+The world width/depth and maximum height come from the manifest:
 
 ```text
-world_size = 16384 * TERRAIN_HORIZONTAL_SCALE
-           = 16384 * 0.5
-           = 8192 x 8192 world units
+world_width  = source_width  * horizontal_scale
+world_depth  = source_height * horizontal_scale
+max_height   = height_scale
+```
+
+For the current continent defaults this is:
+
+```text
+16384 * 0.5 = 8192 x 8192 world units
+height_scale = 535.5 world units
 ```
 
 The camera starts inside this world and `camera.max_distance` is initialized to the terrain diagonal, so rays can reach any map edge from inside the map.
@@ -81,15 +91,17 @@ Height map sampling is nearest-cell sampling through `texelFetch`, not filtered 
 float height_cell(sampler2D height_map, vec2 world_pos, vec2 map_size)
 ```
 
-The shader converts `world_pos / terrain.xy` into normalized terrain UVs, then into integer texture cells. Height map addressing is clamped to the valid texture bounds. The samplers use repeat mode, but the shader clamps height texels explicitly.
+Far height sampling converts `world_pos / terrain.xy` into normalized terrain UVs, then into integer far-map cells.
 
-The color map is sampled separately with:
+Near height sampling first resolves the world position to:
 
-```glsl
-textureLod(color_map, world_pos / terrain.xy, 0.0)
+```text
+source cell -> resident source-cell window -> ring atlas cell
 ```
 
-The color sampler uses nearest filtering and repeat addressing.
+The shader checks whether the source cell is inside the resident near window before using a near tile. Ring atlas coordinates are computed from the resident window origin and an atlas-origin uniform, avoiding integer division in the hot path. If the source cell is outside the resident window, the far height map is used instead.
+
+Color sampling follows the same resident-window check. Resident near color comes from the near color atlas. Distant color falls back to the far color overview.
 
 ## Height LOD
 
@@ -108,9 +120,10 @@ Those two distances come from:
 
 Behavior:
 
-- Before `height_lod_blend_start`, terrain height comes from the 16k near height map.
-- After `height_lod_blend_end`, terrain height comes from the 2k far height map.
-- Between them, the shader linearly mixes the two heights using a smoothstep blend.
+- Before `height_lod_blend_start`, terrain height comes from the resident near height tile when available.
+- After `height_lod_blend_end`, terrain height comes from the far max-height map.
+- Between them, the shader linearly mixes near and far heights using a smoothstep blend.
+- If the requested near tile is not resident, the shader uses the far max-height map immediately.
 
 The far map is a max-height mip. That means each far texel stores the maximum source height over the area it represents, rather than an average. This is conservative for distant terrain: peaks and ridges are less likely to disappear between coarse samples.
 
@@ -125,13 +138,13 @@ Horizontal distance from camera
 |---------------------------------------------------------------------------------------->
 
 HEIGHT SOURCE
-|-- 16k near heightmap --|==== smooth blend ====|-- 2k max-height far map --------------->
+|-- resident near tile --|==== smooth blend ====|-- 2k max-height far map --------------->
                          ^                      ^
                          |                      |
               height_lod_blend_start  height_lod_blend_end
 
 RAY / HIT METHOD
-|-- near 16k DDA --|-- main distance-scaled raymarch ------------------|-- 2D backdrop -->
+|-- resident-tile DDA --|-- main distance-scaled raymarch -------------|-- 2D backdrop -->
                    ^                                                    ^
                    |                                                    |
           near_dda_distance                           ray_iteration_count exhausted
@@ -146,14 +159,14 @@ LIGHTING DETAIL
                               normal_detail_blend_start  normal_detail_blend_end
 
 COLOR
-|-- 8192 diffuse colormap, nearest sampled, repeated across the terrain ----------------->
+|-- resident near color tiles when available --|-- far color overview fallback ----------->
 ```
 
 Typical interpretation:
 
-- Close terrain gets the detailed 16k height map and the near-cell DDA path.
+- Close terrain gets resident detailed height/color tiles and the near-cell DDA path.
 - Mid-distance terrain uses the main raymarch with growing steps and a near-to-far height blend.
-- Distant raymarched terrain uses the 2k max-height map and gradually loses detailed normal lighting.
+- Distant raymarched terrain uses the far max-height map and gradually loses detailed normal lighting.
 - If the main raymarch runs out of iterations before reaching the map edge, the 2D backdrop can fill in farther silhouettes from the far map.
 
 ## Rendering Stages
@@ -175,7 +188,7 @@ Before doing terrain work, the shader clips the ray against the terrain axis-ali
 
 ```text
 x: 0 .. terrain width
-y: 0 .. TERRAIN_HEIGHT_SCALE
+y: 0 .. height_scale
 z: 0 .. terrain depth
 ```
 
@@ -185,13 +198,13 @@ This prevents upward-looking rays from burning the full raymarch budget.
 
 ### 2. Near DDA
 
-The first part of the ray uses a grid traversal over the near 16k height map:
+The first part of the ray uses a grid traversal over resident near height cells:
 
 ```glsl
 raycast_near_height_cells(...)
 ```
 
-This is a 2D DDA through height-map cells. It steps cell boundary to cell boundary across the detailed map and tests whether the ray crosses the height value in each cell. It is meant to make very close terrain stable and detailed without relying on many tiny generic raymarch steps.
+This is a 2D DDA through height-map cells. It steps cell boundary to cell boundary across resident detailed tiles and tests whether the ray crosses the height value in each cell. It is meant to make very close terrain stable and detailed without relying on many tiny generic raymarch steps. If the traversal leaves the resident near window, it exits and lets the main raymarch continue with normal far/LOD sampling.
 
 Controlled by:
 
@@ -290,6 +303,8 @@ Missing keys use built-in defaults from `src/main.rs`.
 
 | Key | Default | Valid range / values | Effect |
 | --- | ---: | --- | --- |
+| `worldmap` | `"assets/worldmaps/continent/manifest.toml"` | non-empty path | Generated worldmap manifest to load. |
+| `tile_cache_radius` | `1` | `1..2` | Radius of the resident near-tile cache. `1` means `3x3` tiles; `2` means `5x5`. |
 | `ray_iteration_count` | `700` | `1..4096` | Main raymarch iteration budget. If it runs out, the far backdrop may take over. |
 | `performance_render_scale` | `0.5` | `> 0.0` and `<= 1.0` | Multiplies the window size for the offscreen terrain render target. Lower is faster and more pixelated. |
 | `present_mode` | `"vsync"` | `"vsync"`, `"immediate"`, `"mailbox"` | SDL GPU swapchain present mode. |
@@ -331,16 +346,16 @@ Height source colors:
 
 | Color | Meaning |
 | --- | --- |
-| Blue | Near 16k height map |
-| Purple | Smooth blend between near and far height maps |
-| Orange | Far 2k max-height map |
+| Blue | Resident near height tile |
+| Purple | Smooth blend between resident near height and far height |
+| Orange | Far max-height map |
 | Red/orange | Far 2D backdrop |
 
 Ray / hit method colors:
 
 | Color | Meaning |
 | --- | --- |
-| Green | Near 16k DDA hit |
+| Green | Resident near-tile DDA hit |
 | Cyan | Main distance-scaled raymarch hit |
 | Yellow | Large-step probe hit |
 | Magenta | Far 2D backdrop hit |
@@ -356,7 +371,7 @@ Normal lighting colors:
 
 ## Collision and Gravity Mode
 
-CPU-side terrain collision uses the near 16k height map through `HeightField`. The CPU samples the raw R16 data with bilinear filtering and scales it with the same `TERRAIN_HEIGHT_SCALE`.
+CPU-side terrain collision uses the resident near height tile cache through `HeightField`. The CPU samples raw R16 tile data with bilinear filtering and scales it with the manifest `height_scale`.
 
 Gravity/player mode uses this CPU height field to:
 
@@ -364,7 +379,7 @@ Gravity/player mode uses this CPU height field to:
 - apply gravity and jumping,
 - clamp horizontal movement inside the terrain world.
 
-The shader and the CPU collision system therefore share the same detailed near height source, but the shader samples it with nearest texel fetch while the CPU collision uses bilinear interpolation.
+The shader and the CPU collision system share the same resident detailed near height tiles. The shader samples them with nearest texel fetch while CPU collision uses bilinear interpolation. Tiles use ring atlas slots, so crossing a tile boundary uploads only the newly visible row or column instead of reshuffling the full atlas.
 
 ## Asset Generation Tools
 
@@ -372,6 +387,7 @@ The repo includes helper binaries for derived assets:
 
 | Tool | Purpose |
 | --- | --- |
+| `build_worldmap` | Generate tiled worldmap packages from source height/color maps. |
 | `max_height_mip` | Generate conservative max-height R16 mips for far terrain. |
 | `upsample_heightmap` | Generate bilinear interpolated R16 height maps. |
 | `upsample_colormap` | Generate bilinear upsampled, ordered-dithered PNG color maps. |
