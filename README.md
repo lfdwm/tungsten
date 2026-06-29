@@ -42,7 +42,7 @@ Replay a recorded trace as a fullscreen benchmark:
 cargo run --release -- --replay-camera recordings/camera-0000000000000.tsv
 ```
 
-Replay honors `present_mode` and `max_framerate` from `config.toml`, interpolates between recorded samples, exits after the last sample, and writes FPS statistics to stdout.
+Replay honors `present_mode` and `max_framerate` from `config.toml`, interpolates between recorded samples, exits after the last sample, and writes FPS statistics to stdout. The stdout summary ignores the first replay frames as warmup. It also writes a graph-friendly CSV under `/tmp/tungsten-replay-fps-*.csv` with average/min/max FPS buckets for each 10 replay frames.
 
 ## Tools
 

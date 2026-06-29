@@ -28,6 +28,8 @@ const WINDOW_HEIGHT: u32 = 720;
 const CONFIG_PATH: &str = "config.toml";
 const CAMERA_RECORDING_DIR: &str = "recordings";
 const CAMERA_RECORDING_INTERVAL_FRAMES: u64 = 10;
+const REPLAY_STATS_BUCKET_FRAMES: u64 = 10;
+const REPLAY_SUMMARY_WARMUP_FRAMES: u64 = 10;
 //const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 4096_diffuse.png";
 const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 8192_diffuse.png";
 //const HEIGHT_MAP_NEAR_PATH: &str = "assets/untracked/continent Height Output 8192.r16";
@@ -273,6 +275,10 @@ impl CameraReplay {
         Self { trace, frame }
     }
 
+    fn current_frame(&self) -> u64 {
+        self.frame
+    }
+
     fn apply_to_camera(&self, camera: &mut Camera) -> bool {
         if let Some(sample) = self.trace.sample_at_frame(self.frame) {
             sample.apply_to_camera(camera);
@@ -353,27 +359,96 @@ impl CameraRecorder {
 }
 
 struct ReplayStats {
+    submitted_frame_count: u64,
     frame_count: u64,
     total: Duration,
     min: Option<Duration>,
     max: Option<Duration>,
+    buckets: Vec<ReplayStatsBucket>,
+}
+
+struct ReplayStatsBucket {
+    replay_frame_start: u64,
+    replay_frame_end: u64,
+    frame_count: u64,
+    total: Duration,
+    min: Duration,
+    max: Duration,
+}
+
+impl ReplayStatsBucket {
+    fn new(replay_frame: u64, duration: Duration) -> Self {
+        Self {
+            replay_frame_start: replay_frame,
+            replay_frame_end: replay_frame,
+            frame_count: 1,
+            total: duration,
+            min: duration,
+            max: duration,
+        }
+    }
+
+    fn record_frame(&mut self, replay_frame: u64, duration: Duration) {
+        self.replay_frame_end = replay_frame;
+        self.frame_count += 1;
+        self.total += duration;
+        self.min = self.min.min(duration);
+        self.max = self.max.max(duration);
+    }
+
+    fn average_fps(&self) -> f64 {
+        let elapsed_seconds = self.total.as_secs_f64();
+        if elapsed_seconds > 0.0 {
+            self.frame_count as f64 / elapsed_seconds
+        } else {
+            0.0
+        }
+    }
+
+    fn average_frame_ms(&self) -> f64 {
+        let elapsed_seconds = self.total.as_secs_f64();
+        if self.frame_count > 0 {
+            elapsed_seconds * 1000.0 / self.frame_count as f64
+        } else {
+            0.0
+        }
+    }
 }
 
 impl ReplayStats {
     fn new() -> Self {
         Self {
+            submitted_frame_count: 0,
             frame_count: 0,
             total: Duration::ZERO,
             min: None,
             max: None,
+            buckets: Vec::new(),
         }
     }
 
-    fn record_frame(&mut self, duration: Duration) {
-        self.frame_count += 1;
-        self.total += duration;
-        self.min = Some(self.min.map_or(duration, |min| min.min(duration)));
-        self.max = Some(self.max.map_or(duration, |max| max.max(duration)));
+    fn record_frame(&mut self, replay_frame: u64, duration: Duration) {
+        self.submitted_frame_count += 1;
+        if self.submitted_frame_count > REPLAY_SUMMARY_WARMUP_FRAMES {
+            self.frame_count += 1;
+            self.total += duration;
+            self.min = Some(self.min.map_or(duration, |min| min.min(duration)));
+            self.max = Some(self.max.map_or(duration, |max| max.max(duration)));
+        }
+
+        if let Some(bucket) = self.buckets.last_mut() {
+            if bucket.frame_count < REPLAY_STATS_BUCKET_FRAMES {
+                bucket.record_frame(replay_frame, duration);
+                return;
+            }
+        }
+
+        self.buckets
+            .push(ReplayStatsBucket::new(replay_frame, duration));
+    }
+
+    fn ignored_summary_frame_count(&self) -> u64 {
+        self.submitted_frame_count.min(REPLAY_SUMMARY_WARMUP_FRAMES)
     }
 }
 
@@ -476,6 +551,10 @@ fn print_replay_stats(stats: &ReplayStats) {
 
     println!("replay complete");
     println!("frames: {}", stats.frame_count);
+    println!(
+        "warmup_frames_ignored: {}",
+        stats.ignored_summary_frame_count()
+    );
     println!("elapsed_seconds: {:.6}", elapsed_seconds);
     println!("average_fps: {:.3}", average_fps);
     println!("min_fps: {:.3}", fps_from_frame_duration(max_frame));
@@ -483,6 +562,59 @@ fn print_replay_stats(stats: &ReplayStats) {
     println!("frame_ms_min: {:.3}", frame_duration_ms(min_frame));
     println!("frame_ms_avg: {:.3}", average_frame_ms);
     println!("frame_ms_max: {:.3}", frame_duration_ms(max_frame));
+}
+
+fn write_replay_stats_csv(stats: &ReplayStats) -> Result<PathBuf, Box<dyn Error>> {
+    let (path, file) = create_replay_stats_file()?;
+    let mut writer = BufWriter::new(file);
+
+    writeln!(
+        writer,
+        "bucket_index,replay_frame_start,replay_frame_end,frames,elapsed_ms,average_fps,min_fps,max_fps,frame_ms_min,frame_ms_avg,frame_ms_max"
+    )?;
+
+    for (bucket_index, bucket) in stats.buckets.iter().enumerate() {
+        writeln!(
+            writer,
+            "{},{},{},{},{:.6},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+            bucket_index,
+            bucket.replay_frame_start,
+            bucket.replay_frame_end,
+            bucket.frame_count,
+            frame_duration_ms(bucket.total),
+            bucket.average_fps(),
+            fps_from_frame_duration(bucket.max),
+            fps_from_frame_duration(bucket.min),
+            frame_duration_ms(bucket.min),
+            bucket.average_frame_ms(),
+            frame_duration_ms(bucket.max)
+        )?;
+    }
+
+    writer.flush()?;
+    Ok(path)
+}
+
+fn create_replay_stats_file() -> Result<(PathBuf, File), Box<dyn Error>> {
+    let timestamp_millis = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+
+    for attempt in 0..1000 {
+        let file_name = if attempt == 0 {
+            format!("tungsten-replay-fps-{timestamp_millis}.csv")
+        } else {
+            format!("tungsten-replay-fps-{timestamp_millis}-{attempt}.csv")
+        };
+        let path = Path::new("/tmp").join(file_name);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!("failed to create {}: {error}", path.display()).into());
+            }
+        }
+    }
+
+    Err("failed to create a unique replay FPS stats path".into())
 }
 
 fn fps_from_frame_duration(duration: Duration) -> f64 {
@@ -1223,10 +1355,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             if let Some(active_recorder) = camera_recorder.as_mut() {
                 active_recorder.update_after_submitted_frame(&camera)?;
             }
-            if let Some(stats) = replay_stats.as_mut() {
-                stats.record_frame(now.elapsed());
-            }
             if let Some(active_replay) = replay.as_mut() {
+                if let Some(stats) = replay_stats.as_mut() {
+                    stats.record_frame(active_replay.current_frame(), now.elapsed());
+                }
                 if !active_replay.advance_after_submitted_frame() {
                     replay_completed = true;
                     break 'running;
@@ -1241,6 +1373,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     if replay_completed {
         if let Some(stats) = replay_stats.as_ref() {
             print_replay_stats(stats);
+            let fps_csv_path = write_replay_stats_csv(stats)?;
+            println!("fps_csv: {}", fps_csv_path.display());
         }
     }
 
@@ -2065,6 +2199,29 @@ mod tests {
             sample(10, 20.0, 40.0, 70.0, 1.0, 0.0)
         );
         assert!(trace.sample_at_frame(11).is_none());
+    }
+
+    #[test]
+    fn buckets_replay_stats_every_ten_frames() {
+        let mut stats = ReplayStats::new();
+        for frame in 0..11 {
+            stats.record_frame(frame, Duration::from_millis(frame + 1));
+        }
+
+        assert_eq!(stats.submitted_frame_count, 11);
+        assert_eq!(stats.frame_count, 10);
+        assert_eq!(stats.ignored_summary_frame_count(), 1);
+        assert_eq!(stats.min, Some(Duration::from_millis(2)));
+        assert_eq!(stats.max, Some(Duration::from_millis(11)));
+        assert_eq!(stats.buckets.len(), 2);
+        assert_eq!(stats.buckets[0].replay_frame_start, 0);
+        assert_eq!(stats.buckets[0].replay_frame_end, 9);
+        assert_eq!(stats.buckets[0].frame_count, 10);
+        assert_eq!(stats.buckets[0].min, Duration::from_millis(1));
+        assert_eq!(stats.buckets[0].max, Duration::from_millis(10));
+        assert_eq!(stats.buckets[1].replay_frame_start, 10);
+        assert_eq!(stats.buckets[1].replay_frame_end, 10);
+        assert_eq!(stats.buckets[1].frame_count, 1);
     }
 
     #[test]
