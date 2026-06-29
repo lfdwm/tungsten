@@ -34,6 +34,16 @@ In gravity mode, `WASD` moves along the terrain and `Space` jumps. Scroll adjust
 
 When `render_debug_visuals` is enabled, `F3` cycles through no debug view, height source colors, ray/hit method colors, and normal-lighting mode colors.
 
+Press `F11` to start recording a camera trace, and press `F11` again to stop. Recordings are written under `recordings/` as TSV files with `frame x y height yaw pitch` samples every 10 submitted frames.
+
+Replay a recorded trace as a fullscreen benchmark:
+
+```sh
+cargo run --release -- --replay-camera recordings/camera-0000000000000.tsv
+```
+
+Replay honors `present_mode` and `max_framerate` from `config.toml`, interpolates between recorded samples, exits after the last sample, and writes FPS statistics to stdout.
+
 ## Tools
 
 Generate a conservative max-height R16 mip:

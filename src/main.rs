@@ -1,7 +1,12 @@
 use std::{
+    env,
     error::Error,
-    fs, io, thread,
-    time::{Duration, Instant},
+    ffi::OsString,
+    fs::{self, File, OpenOptions},
+    io::{self, BufWriter, Write},
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use image::GenericImageView;
@@ -21,6 +26,8 @@ use sdl3::{
 const WINDOW_WIDTH: u32 = 1280;
 const WINDOW_HEIGHT: u32 = 720;
 const CONFIG_PATH: &str = "config.toml";
+const CAMERA_RECORDING_DIR: &str = "recordings";
+const CAMERA_RECORDING_INTERVAL_FRAMES: u64 = 10;
 //const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 4096_diffuse.png";
 const COLOR_MAP_PATH: &str = "assets/untracked/continent Material Output 8192_diffuse.png";
 //const HEIGHT_MAP_NEAR_PATH: &str = "assets/untracked/continent Height Output 8192.r16";
@@ -62,6 +69,46 @@ const PLAYER_JUMP_SPEED: f32 = 105.0;
 const PLAYER_MAX_FALL_SPEED: f32 = 260.0;
 const PLAYER_GROUND_SNAP: f32 = 8.0;
 
+#[derive(Debug, PartialEq, Eq)]
+struct AppArgs {
+    replay_camera: Option<PathBuf>,
+}
+
+impl AppArgs {
+    fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self, Box<dyn Error>> {
+        let mut replay_camera = None;
+        let mut args = args.into_iter();
+
+        while let Some(arg) = args.next() {
+            match arg.to_str() {
+                Some("--replay-camera") => {
+                    replay_camera =
+                        Some(PathBuf::from(next_arg_value(&mut args, "--replay-camera")?))
+                }
+                Some("--help" | "-h") => return Err(app_usage().into()),
+                Some(flag) if flag.starts_with('-') => {
+                    return Err(format!("unknown flag: {flag}").into());
+                }
+                _ => return Err(app_usage().into()),
+            }
+        }
+
+        Ok(Self { replay_camera })
+    }
+}
+
+fn next_arg_value(
+    args: &mut impl Iterator<Item = OsString>,
+    flag: &'static str,
+) -> Result<OsString, Box<dyn Error>> {
+    args.next()
+        .ok_or_else(|| format!("{flag} requires a value").into())
+}
+
+fn app_usage() -> &'static str {
+    "usage: tungsten [--replay-camera <camera-trace.tsv>]"
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct ShaderParams {
@@ -92,6 +139,359 @@ struct Camera {
     pitch: f32,
     vertical_fov: f32,
     max_distance: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CameraSample {
+    frame: u64,
+    x: f32,
+    y: f32,
+    height: f32,
+    yaw: f32,
+    pitch: f32,
+}
+
+impl CameraSample {
+    fn from_camera(frame: u64, camera: &Camera) -> Self {
+        Self {
+            frame,
+            x: camera.x,
+            y: camera.y,
+            height: camera.height,
+            yaw: camera.yaw,
+            pitch: camera.pitch,
+        }
+    }
+
+    fn apply_to_camera(self, camera: &mut Camera) {
+        camera.x = self.x;
+        camera.y = self.y;
+        camera.height = self.height;
+        camera.yaw = self.yaw;
+        camera.pitch = self.pitch;
+    }
+
+    fn interpolate(a: Self, b: Self, frame: u64) -> Self {
+        let frame_delta = (b.frame - a.frame) as f32;
+        let t = if frame_delta > 0.0 {
+            (frame - a.frame) as f32 / frame_delta
+        } else {
+            0.0
+        };
+
+        Self {
+            frame,
+            x: lerp(a.x, b.x, t),
+            y: lerp(a.y, b.y, t),
+            height: lerp(a.height, b.height, t),
+            yaw: lerp(a.yaw, b.yaw, t),
+            pitch: lerp(a.pitch, b.pitch, t),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CameraTrace {
+    samples: Vec<CameraSample>,
+}
+
+impl CameraTrace {
+    fn load(path: &Path) -> Result<Self, Box<dyn Error>> {
+        let contents = fs::read_to_string(path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        Self::parse(&contents).map_err(|error| format!("{}: {error}", path.display()).into())
+    }
+
+    fn parse(contents: &str) -> Result<Self, String> {
+        let mut samples: Vec<CameraSample> = Vec::new();
+
+        for (line_index, raw_line) in contents.lines().enumerate() {
+            let line_number = line_index + 1;
+            let line = raw_line
+                .split_once('#')
+                .map_or(raw_line, |(before_comment, _)| before_comment)
+                .trim();
+
+            if line.is_empty() {
+                continue;
+            }
+
+            let sample = parse_camera_sample(line, line_number)?;
+            if let Some(previous) = samples.last() {
+                if sample.frame <= previous.frame {
+                    return Err(format!(
+                        "line {line_number}: frame values must be strictly increasing"
+                    ));
+                }
+            }
+            samples.push(sample);
+        }
+
+        if samples.len() < 2 {
+            return Err("camera trace must contain at least two samples".to_owned());
+        }
+
+        Ok(Self { samples })
+    }
+
+    fn first_frame(&self) -> u64 {
+        self.samples[0].frame
+    }
+
+    fn last_frame(&self) -> u64 {
+        self.samples[self.samples.len() - 1].frame
+    }
+
+    fn sample_at_frame(&self, frame: u64) -> Option<CameraSample> {
+        if frame > self.last_frame() {
+            return None;
+        }
+        if frame <= self.first_frame() {
+            return Some(self.samples[0]);
+        }
+
+        self.samples.windows(2).find_map(|samples| {
+            let a = samples[0];
+            let b = samples[1];
+            if frame <= b.frame {
+                Some(CameraSample::interpolate(a, b, frame))
+            } else {
+                None
+            }
+        })
+    }
+}
+
+struct CameraReplay {
+    trace: CameraTrace,
+    frame: u64,
+}
+
+impl CameraReplay {
+    fn new(trace: CameraTrace) -> Self {
+        let frame = trace.first_frame();
+        Self { trace, frame }
+    }
+
+    fn apply_to_camera(&self, camera: &mut Camera) -> bool {
+        if let Some(sample) = self.trace.sample_at_frame(self.frame) {
+            sample.apply_to_camera(camera);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn advance_after_submitted_frame(&mut self) -> bool {
+        if self.frame >= self.trace.last_frame() {
+            false
+        } else {
+            self.frame += 1;
+            true
+        }
+    }
+}
+
+struct CameraRecordingSummary {
+    path: PathBuf,
+    sample_count: u64,
+}
+
+struct CameraRecorder {
+    writer: BufWriter<File>,
+    path: PathBuf,
+    frame: u64,
+    sample_count: u64,
+}
+
+impl CameraRecorder {
+    fn start(camera: &Camera) -> Result<Self, Box<dyn Error>> {
+        let (path, file) = create_camera_recording_file()?;
+        let mut recorder = Self {
+            writer: BufWriter::new(file),
+            path,
+            frame: 0,
+            sample_count: 0,
+        };
+
+        writeln!(recorder.writer, "# tungsten camera trace v1")?;
+        writeln!(recorder.writer, "# frame\tx\ty\theight\tyaw\tpitch")?;
+        recorder.write_sample(camera)?;
+
+        println!("camera recording started: {}", recorder.path.display());
+        Ok(recorder)
+    }
+
+    fn update_after_submitted_frame(&mut self, camera: &Camera) -> Result<(), Box<dyn Error>> {
+        self.frame += 1;
+        if self.frame % CAMERA_RECORDING_INTERVAL_FRAMES == 0 {
+            self.write_sample(camera)?;
+        }
+
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<CameraRecordingSummary, Box<dyn Error>> {
+        self.writer.flush()?;
+        Ok(CameraRecordingSummary {
+            path: self.path,
+            sample_count: self.sample_count,
+        })
+    }
+
+    fn write_sample(&mut self, camera: &Camera) -> Result<(), Box<dyn Error>> {
+        let sample = CameraSample::from_camera(self.frame, camera);
+        writeln!(
+            self.writer,
+            "{}\t{:.9}\t{:.9}\t{:.9}\t{:.9}\t{:.9}",
+            sample.frame, sample.x, sample.y, sample.height, sample.yaw, sample.pitch
+        )?;
+        self.sample_count += 1;
+
+        Ok(())
+    }
+}
+
+struct ReplayStats {
+    frame_count: u64,
+    total: Duration,
+    min: Option<Duration>,
+    max: Option<Duration>,
+}
+
+impl ReplayStats {
+    fn new() -> Self {
+        Self {
+            frame_count: 0,
+            total: Duration::ZERO,
+            min: None,
+            max: None,
+        }
+    }
+
+    fn record_frame(&mut self, duration: Duration) {
+        self.frame_count += 1;
+        self.total += duration;
+        self.min = Some(self.min.map_or(duration, |min| min.min(duration)));
+        self.max = Some(self.max.map_or(duration, |max| max.max(duration)));
+    }
+}
+
+fn parse_camera_sample(line: &str, line_number: usize) -> Result<CameraSample, String> {
+    let fields: Vec<_> = line.split_whitespace().collect();
+    if fields.len() != 6 {
+        return Err(format!(
+            "line {line_number}: expected 6 fields: frame x y height yaw pitch"
+        ));
+    }
+
+    let frame = fields[0]
+        .parse()
+        .map_err(|_| format!("line {line_number}: `frame` must be an unsigned integer"))?;
+
+    Ok(CameraSample {
+        frame,
+        x: parse_camera_sample_f32(fields[1], "x", line_number)?,
+        y: parse_camera_sample_f32(fields[2], "y", line_number)?,
+        height: parse_camera_sample_f32(fields[3], "height", line_number)?,
+        yaw: parse_camera_sample_f32(fields[4], "yaw", line_number)?,
+        pitch: parse_camera_sample_f32(fields[5], "pitch", line_number)?,
+    })
+}
+
+fn parse_camera_sample_f32(value: &str, name: &str, line_number: usize) -> Result<f32, String> {
+    let parsed: f32 = value
+        .parse()
+        .map_err(|_| format!("line {line_number}: `{name}` must be a number"))?;
+
+    if !parsed.is_finite() {
+        return Err(format!("line {line_number}: `{name}` must be finite"));
+    }
+
+    Ok(parsed)
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn create_camera_recording_file() -> Result<(PathBuf, File), Box<dyn Error>> {
+    fs::create_dir_all(CAMERA_RECORDING_DIR)?;
+    let timestamp_millis = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+
+    for attempt in 0..1000 {
+        let file_name = if attempt == 0 {
+            format!("camera-{timestamp_millis}.tsv")
+        } else {
+            format!("camera-{timestamp_millis}-{attempt}.tsv")
+        };
+        let path = Path::new(CAMERA_RECORDING_DIR).join(file_name);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!("failed to create {}: {error}", path.display()).into());
+            }
+        }
+    }
+
+    Err("failed to create a unique camera recording path".into())
+}
+
+fn toggle_camera_recording(
+    recorder: &mut Option<CameraRecorder>,
+    camera: &Camera,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(active_recorder) = recorder.take() {
+        print_camera_recording_summary(active_recorder.finish()?);
+    } else {
+        *recorder = Some(CameraRecorder::start(camera)?);
+    }
+
+    Ok(())
+}
+
+fn print_camera_recording_summary(summary: CameraRecordingSummary) {
+    println!(
+        "camera recording saved: {} ({} samples)",
+        summary.path.display(),
+        summary.sample_count
+    );
+}
+
+fn print_replay_stats(stats: &ReplayStats) {
+    let elapsed_seconds = stats.total.as_secs_f64();
+    let average_fps = if elapsed_seconds > 0.0 {
+        stats.frame_count as f64 / elapsed_seconds
+    } else {
+        0.0
+    };
+    let min_frame = stats.min.unwrap_or(Duration::ZERO);
+    let max_frame = stats.max.unwrap_or(Duration::ZERO);
+    let average_frame_ms = if stats.frame_count > 0 {
+        elapsed_seconds * 1000.0 / stats.frame_count as f64
+    } else {
+        0.0
+    };
+
+    println!("replay complete");
+    println!("frames: {}", stats.frame_count);
+    println!("elapsed_seconds: {:.6}", elapsed_seconds);
+    println!("average_fps: {:.3}", average_fps);
+    println!("min_fps: {:.3}", fps_from_frame_duration(max_frame));
+    println!("max_fps: {:.3}", fps_from_frame_duration(min_frame));
+    println!("frame_ms_min: {:.3}", frame_duration_ms(min_frame));
+    println!("frame_ms_avg: {:.3}", average_frame_ms);
+    println!("frame_ms_max: {:.3}", frame_duration_ms(max_frame));
+}
+
+fn fps_from_frame_duration(duration: Duration) -> f64 {
+    let seconds = duration.as_secs_f64();
+    if seconds > 0.0 { 1.0 / seconds } else { 0.0 }
+}
+
+fn frame_duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 struct TerrainMaps {
@@ -566,15 +966,32 @@ fn validate_blend_range(name: &str, start: f32, end: f32) -> Result<(), String> 
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let args = AppArgs::parse(env::args_os().skip(1))?;
+    let replay_trace = args
+        .replay_camera
+        .as_deref()
+        .map(CameraTrace::load)
+        .transpose()?;
+    let replay_enabled = replay_trace.is_some();
+    let mut replay = replay_trace.map(CameraReplay::new);
+    let mut replay_stats = if replay_enabled {
+        Some(ReplayStats::new())
+    } else {
+        None
+    };
+    let mut replay_completed = false;
+
     let config = AppConfig::load(CONFIG_PATH)?;
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
 
-    let window = video
-        .window("tungsten - SDL_GPU VoxelSpace", WINDOW_WIDTH, WINDOW_HEIGHT)
-        .position_centered()
-        .resizable()
-        .build()?;
+    let mut window_builder =
+        video.window("tungsten - SDL_GPU VoxelSpace", WINDOW_WIDTH, WINDOW_HEIGHT);
+    window_builder.position_centered().resizable();
+    if replay_enabled {
+        window_builder.fullscreen();
+    }
+    let window = window_builder.build()?;
 
     let gpu = Device::new(ShaderFormat::SPIRV, cfg!(debug_assertions))?.with_window(&window)?;
     gpu.set_swapchain_parameters(
@@ -611,6 +1028,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut player_physics = PlayerPhysics::new();
     let mut fps_counter = FpsCounter::new();
     let mut debug_visual_mode = DebugVisualMode::None;
+    let mut camera_recorder = None;
 
     let mut events = sdl.event_pump()?;
     let mut previous_frame = Instant::now();
@@ -626,18 +1044,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
-                Event::MouseMotion { xrel, yrel, .. } => {
+                Event::MouseMotion { xrel, yrel, .. } if !replay_enabled => {
                     mouse_delta[0] += xrel;
                     mouse_delta[1] += yrel;
                 }
-                Event::MouseWheel { y, .. } => {
+                Event::MouseWheel { y, .. } if !replay_enabled => {
                     wheel_delta += y;
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::G),
                     repeat: false,
                     ..
-                } => {
+                } if !replay_enabled => {
                     camera_mode = match camera_mode {
                         CameraMode::Freecam => {
                             enable_gravity_mode(
@@ -654,14 +1072,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     keycode: Some(Keycode::Space),
                     repeat: false,
                     ..
-                } => {
+                } if !replay_enabled => {
                     jump_requested = true;
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::F3),
                     repeat: false,
                     ..
-                } => {
+                } if !replay_enabled => {
                     if config.render_debug_visuals {
                         debug_visual_mode = debug_visual_mode.next();
                         println!(
@@ -671,6 +1089,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                         );
                     }
                 }
+                Event::KeyDown {
+                    keycode: Some(Keycode::F11),
+                    repeat: false,
+                    ..
+                } if !replay_enabled => {
+                    toggle_camera_recording(&mut camera_recorder, &camera)?;
+                }
                 _ => {}
             }
         }
@@ -679,31 +1104,39 @@ fn main() -> Result<(), Box<dyn Error>> {
         let frame_duration = now - previous_frame;
         let dt = frame_duration.min(Duration::from_millis(50));
         previous_frame = now;
-        if camera_mode == CameraMode::Gravity && wheel_delta != 0.0 {
-            let keyboard = events.keyboard_state();
-            let adjust_move_speed = keyboard.is_scancode_pressed(Scancode::LShift)
-                || keyboard.is_scancode_pressed(Scancode::RShift);
-            apply_gravity_wheel_adjustment(
-                &mut camera,
-                &mut player_physics,
-                &terrain_maps.collision_height,
-                wheel_delta,
-                adjust_move_speed,
-            );
-        }
-        match camera_mode {
-            CameraMode::Freecam => {
-                update_freecam(&events, &mut camera, dt.as_secs_f32(), mouse_delta)
+
+        if let Some(active_replay) = replay.as_ref() {
+            if !active_replay.apply_to_camera(&mut camera) {
+                replay_completed = true;
+                break 'running;
             }
-            CameraMode::Gravity => update_gravity_camera(
-                &events,
-                &mut camera,
-                &mut player_physics,
-                &terrain_maps.collision_height,
-                dt.as_secs_f32(),
-                mouse_delta,
-                jump_requested,
-            ),
+        } else {
+            if camera_mode == CameraMode::Gravity && wheel_delta != 0.0 {
+                let keyboard = events.keyboard_state();
+                let adjust_move_speed = keyboard.is_scancode_pressed(Scancode::LShift)
+                    || keyboard.is_scancode_pressed(Scancode::RShift);
+                apply_gravity_wheel_adjustment(
+                    &mut camera,
+                    &mut player_physics,
+                    &terrain_maps.collision_height,
+                    wheel_delta,
+                    adjust_move_speed,
+                );
+            }
+            match camera_mode {
+                CameraMode::Freecam => {
+                    update_freecam(&events, &mut camera, dt.as_secs_f32(), mouse_delta)
+                }
+                CameraMode::Gravity => update_gravity_camera(
+                    &events,
+                    &mut camera,
+                    &mut player_physics,
+                    &terrain_maps.collision_height,
+                    dt.as_secs_f32(),
+                    mouse_delta,
+                    jump_requested,
+                ),
+            }
         }
 
         let (window_width, window_height) = window.size();
@@ -720,6 +1153,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .expect("render target should be initialized before drawing");
 
         let mut command_buffer = gpu.acquire_command_buffer()?;
+        let mut frame_submitted = false;
         let params = shader_params(
             &camera,
             &terrain_maps,
@@ -777,12 +1211,37 @@ fn main() -> Result<(), Box<dyn Error>> {
             gpu.end_render_pass(upscale_pass);
 
             command_buffer.submit()?;
+            frame_submitted = true;
         } else {
             command_buffer.cancel();
         }
 
         fps_counter.update(frame_duration);
         limit_framerate(now, config.max_framerate);
+
+        if frame_submitted {
+            if let Some(active_recorder) = camera_recorder.as_mut() {
+                active_recorder.update_after_submitted_frame(&camera)?;
+            }
+            if let Some(stats) = replay_stats.as_mut() {
+                stats.record_frame(now.elapsed());
+            }
+            if let Some(active_replay) = replay.as_mut() {
+                if !active_replay.advance_after_submitted_frame() {
+                    replay_completed = true;
+                    break 'running;
+                }
+            }
+        }
+    }
+
+    if let Some(active_recorder) = camera_recorder.take() {
+        print_camera_recording_summary(active_recorder.finish()?);
+    }
+    if replay_completed {
+        if let Some(stats) = replay_stats.as_ref() {
+            print_replay_stats(stats);
+        }
     }
 
     Ok(())
@@ -1478,6 +1937,135 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn os_args(args: &[&str]) -> Vec<std::ffi::OsString> {
+        args.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    fn sample(frame: u64, x: f32, y: f32, height: f32, yaw: f32, pitch: f32) -> CameraSample {
+        CameraSample {
+            frame,
+            x,
+            y,
+            height,
+            yaw,
+            pitch,
+        }
+    }
+
+    fn assert_f32_near(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.0001,
+            "expected {actual} to be near {expected}"
+        );
+    }
+
+    #[test]
+    fn parses_main_args() {
+        assert_eq!(
+            AppArgs::parse(Vec::<std::ffi::OsString>::new()).unwrap(),
+            AppArgs {
+                replay_camera: None
+            }
+        );
+        assert_eq!(
+            AppArgs::parse(os_args(&["--replay-camera", "trace.tsv"])).unwrap(),
+            AppArgs {
+                replay_camera: Some(PathBuf::from("trace.tsv"))
+            }
+        );
+
+        let error = AppArgs::parse(os_args(&["--replay-camera"]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--replay-camera requires a value"));
+
+        let error = AppArgs::parse(os_args(&["--unknown"]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown flag"));
+
+        let error = AppArgs::parse(os_args(&["--help"]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("usage: tungsten"));
+    }
+
+    #[test]
+    fn parses_camera_trace_comments_and_samples() {
+        let trace = CameraTrace::parse(
+            r#"
+            # tungsten camera trace v1
+            # frame x y height yaw pitch
+            0   1.0 2.0 3.0 4.0 5.0
+
+            10  11.0 12.0 13.0 14.0 15.0 # inline comment
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(trace.samples.len(), 2);
+        assert_eq!(trace.samples[0], sample(0, 1.0, 2.0, 3.0, 4.0, 5.0));
+        assert_eq!(trace.samples[1], sample(10, 11.0, 12.0, 13.0, 14.0, 15.0));
+    }
+
+    #[test]
+    fn rejects_invalid_camera_traces() {
+        let error = CameraTrace::parse("0 1.0 2.0 3.0 4.0")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("expected 6 fields"));
+
+        let error = CameraTrace::parse(
+            r#"
+            0 1.0 NaN 3.0 4.0 5.0
+            10 1.0 2.0 3.0 4.0 5.0
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("finite"));
+
+        let error = CameraTrace::parse(
+            r#"
+            10 1.0 2.0 3.0 4.0 5.0
+            10 1.0 2.0 3.0 4.0 5.0
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("strictly increasing"));
+
+        let error = CameraTrace::parse("0 1.0 2.0 3.0 4.0 5.0").unwrap_err();
+        assert!(error.contains("at least two samples"));
+    }
+
+    #[test]
+    fn interpolates_camera_trace_by_frame() {
+        let trace = CameraTrace {
+            samples: vec![
+                sample(0, 10.0, 20.0, 30.0, 0.0, -1.0),
+                sample(10, 20.0, 40.0, 70.0, 1.0, 0.0),
+            ],
+        };
+
+        assert_eq!(
+            trace.sample_at_frame(0).unwrap(),
+            sample(0, 10.0, 20.0, 30.0, 0.0, -1.0)
+        );
+
+        let midpoint = trace.sample_at_frame(5).unwrap();
+        assert_eq!(midpoint.frame, 5);
+        assert_f32_near(midpoint.x, 15.0);
+        assert_f32_near(midpoint.y, 30.0);
+        assert_f32_near(midpoint.height, 50.0);
+        assert_f32_near(midpoint.yaw, 0.5);
+        assert_f32_near(midpoint.pitch, -0.5);
+
+        assert_eq!(
+            trace.sample_at_frame(10).unwrap(),
+            sample(10, 20.0, 40.0, 70.0, 1.0, 0.0)
+        );
+        assert!(trace.sample_at_frame(11).is_none());
+    }
 
     #[test]
     fn parses_config_overrides_and_keeps_defaults() {
