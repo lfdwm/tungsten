@@ -415,3 +415,25 @@ Update `README.md` with the short command examples only. Keep detailed explanati
 - Collision works from detailed tiled height data.
 - No obvious seams at tile boundaries.
 - Documentation explains how to build and use a worldmap package.
+- The replay-camera profiling path runs successfully:
+```sh
+cargo run --bin tungsten -- --replay-camera recordings/camera-1782756981829.tsv
+```
+- FPS statistics from the tiled implementation are not *drastically* worse than the current full-texture renderer on the same machine and config.
+- Any expected performance tradeoffs are documented with the benchmark output used for comparison.
+
+Replay output pre-changes:
+
+```
+replay complete
+frames: 11921
+warmup_frames_ignored: 10
+elapsed_seconds: 69.261487
+average_fps: 172.116
+min_fps: 112.596
+max_fps: 199.960
+frame_ms_min: 5.001
+frame_ms_avg: 5.810
+frame_ms_max: 8.881
+fps_csv: /tmp/tungsten-replay-fps-1782758471650.csv
+```
