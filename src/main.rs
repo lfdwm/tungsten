@@ -1094,7 +1094,7 @@ impl DebugVisualMode {
                 "  green: resident near-tile DDA hit\n  cyan: main raymarch hit\n  yellow: large-step probe hit\n  magenta: far 2D backdrop hit"
             }
             Self::NormalLighting => {
-                "  green: detailed sampled normals\n  yellow: detailed-to-flat lighting blend\n  red: flat far terrain light\n  red/orange: far 2D backdrop flat light"
+                "  green: detailed sampled normals\n  yellow: detailed-to-flat lighting blend\n  red: flat far terrain light"
             }
         }
     }

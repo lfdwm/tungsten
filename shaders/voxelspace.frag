@@ -289,8 +289,8 @@ vec3 terrain_color(vec3 hit_pos, float horizontal_dist) {
     return base * light;
 }
 
-vec3 backdrop_terrain_color(vec2 world_pos) {
-    return color_at(world_pos) * FAR_TERRAIN_LIGHT;
+vec3 backdrop_terrain_color(vec3 hit_pos, float horizontal_dist) {
+    return terrain_color(hit_pos, horizontal_dist);
 }
 
 int debug_mode() {
@@ -332,11 +332,7 @@ vec3 debug_hit_method_color(int hit_method) {
     return vec3(0.1);
 }
 
-vec3 debug_normal_lighting_color(float horizontal_dist, bool backdrop_hit) {
-    if (backdrop_hit) {
-        return vec3(1.0, 0.20, 0.05);
-    }
-
+vec3 debug_normal_lighting_color(float horizontal_dist) {
     float normal_blend = smoothstep(lod_distances.z, lod_distances.w, horizontal_dist);
     if (normal_blend <= 0.001) {
         return vec3(0.05, 1.0, 0.25);
@@ -357,7 +353,7 @@ vec3 debug_terrain_color(vec2 world_pos, float horizontal_dist, int hit_method, 
         return debug_hit_method_color(hit_method);
     }
     if (mode == DEBUG_NORMAL_LIGHTING) {
-        return debug_normal_lighting_color(horizontal_dist, backdrop_hit);
+        return debug_normal_lighting_color(horizontal_dist);
     }
 
     return vec3(0.0);
@@ -802,7 +798,7 @@ void main() {
     )) {
         int mode = debug_mode();
         float fog = smoothstep(raymarch.z * 0.45, raymarch.z, hit_horizontal_dist);
-        vec3 color = mix(backdrop_terrain_color(hit_pos.xz), sky, fog * 0.9);
+        vec3 color = mix(backdrop_terrain_color(hit_pos, hit_horizontal_dist), sky, fog * 0.9);
         if (mode != DEBUG_NONE) {
             vec3 debug_color = debug_terrain_color(hit_pos.xz, hit_horizontal_dist, HIT_METHOD_BACKDROP, true);
             color = mix(color, debug_color, DEBUG_COLOR_BLEND);

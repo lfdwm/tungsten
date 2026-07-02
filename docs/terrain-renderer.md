@@ -262,7 +262,7 @@ This backdrop pass:
 - uses only the far 2048 max-height map,
 - walks forward in horizontal distance,
 - grows step size with distance,
-- uses flat far terrain lighting.
+- shades hits through the same normal-detail lighting blend as raymarched terrain.
 
 This is meant to fill in distant scenery beyond the expensive 3D raymarch budget. It is not as precise as the main raymarch, but it is cheaper and uses the conservative max-height far map.
 
@@ -277,7 +277,7 @@ Current backdrop shader constants:
 | `BACKDROP_MAX_HORIZONTAL_STEP` | `8.0` | Maximum horizontal backdrop step |
 | `BACKDROP_HIT_BIAS` | `2.0` | Allows near misses to count as hits |
 | `BACKDROP_START_BIAS` | `2.0` | Starts backdrop slightly beyond the raymarch stop |
-| `BACKDROP_HEIGHT_OFFSET_FRACTION` | `0.12` | Fraction of `height_scale` subtracted from backdrop height samples |
+| `BACKDROP_HEIGHT_OFFSET_FRACTION` | `0.005` | Fraction of `height_scale` subtracted from backdrop height samples |
 
 ## Lighting, Normals, and Fog
 
@@ -293,7 +293,7 @@ Near/mid terrain computes a terrain normal from four neighboring height samples 
 terrain_light(terrain_normal(world_pos, lod_blend))
 ```
 
-Far terrain gradually blends toward a constant light level:
+Far terrain and backdrop terrain gradually blend toward a constant light level:
 
 ```glsl
 FAR_TERRAIN_LIGHT = 0.84
@@ -303,6 +303,8 @@ The blend range is configured with:
 
 - `normal_detail_blend_start`
 - `normal_detail_blend_end`
+
+The 2D backdrop uses the same lighting function. If a backdrop hit is before `normal_detail_blend_start`, it uses sampled terrain normals; through the blend range it mixes toward flat light; beyond `normal_detail_blend_end`, it uses `FAR_TERRAIN_LIGHT`.
 
 Fog mixes terrain color toward sky based on horizontal hit distance and `camera.max_distance`.
 
@@ -378,7 +380,6 @@ Normal lighting colors:
 | Green | Detailed sampled terrain normals |
 | Yellow | Blending from detailed normals to flat far light |
 | Red | Flat far terrain light |
-| Red/orange | Far 2D backdrop flat light |
 
 ## Collision and Gravity Mode
 
