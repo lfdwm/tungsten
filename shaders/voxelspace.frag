@@ -378,10 +378,10 @@ float raymarch_step_size(float horizontal_dist, float lod_blend) {
 }
 
 int hit_refine_steps(float horizontal_dist) {
-    if (horizontal_dist >= lod_distances.w) {
+    if (horizontal_dist >= lod_distances.y) {
         return HIT_REFINE_FAR_STEPS;
     }
-    if (horizontal_dist >= lod_distances.y) {
+    if (horizontal_dist >= lod_distances.x) {
         return HIT_REFINE_MID_STEPS;
     }
     return HIT_REFINE_NEAR_STEPS;

@@ -213,6 +213,14 @@ Controlled by:
 
 The DDA only runs out to `near_dda_distance` in horizontal world units. After that, the main raymarch takes over.
 
+`near_dda_max_steps` is a separate safety and performance cap on how many height-map cells the DDA may traverse for a single ray. Each step advances to the next source-cell boundary along X and/or Z, samples the next resident near-height cell, and checks whether the ray crossed the cell height. If this step limit is reached before `near_dda_distance`, the DDA exits at its current ray distance and the main raymarch resumes from there.
+
+In practice:
+
+- Higher values let shallow or diagonal rays keep using exact close-cell traversal for longer.
+- Lower values reduce worst-case foreground cost, especially at low camera angles.
+- Too-low values can make the main raymarch take over early, which can reintroduce close terrain popping or missed small features even when `near_dda_distance` is large.
+
 ### 3. Main Raymarch
 
 The main terrain pass uses a distance-scaled step size:
@@ -311,7 +319,7 @@ Missing keys use built-in defaults from `src/main.rs`.
 | `max_framerate` | `0.0` | `>= 0.0` | CPU-side framerate cap. `0.0` means unlimited. |
 | `render_debug_visuals` | `false` | `true` or `false` | Enables cycling terrain debug views with `F3`. |
 | `near_dda_distance` | `512.0` | `> 0.0` | Horizontal distance covered by near detailed DDA before main raymarching. |
-| `near_dda_max_steps` | `1024` | `1..4096` | Maximum detailed DDA cell steps. |
+| `near_dda_max_steps` | `1024` | `1..4096` | Maximum resident near-height cells the DDA may traverse before handing off to the main raymarch. |
 | `start_x` | `250.0` | `>= 0.0` | Initial camera/player X coordinate. |
 | `start_y` | `330.0` | `>= 0.0` | Initial camera/player Y coordinate, mapped to shader Z. |
 | `start_height` | `150.0` | `>= 0.0` | Initial camera/player height. |
