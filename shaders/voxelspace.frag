@@ -136,28 +136,13 @@ vec3 far_color_at(vec2 world_pos) {
 }
 
 bool near_color_at(vec2 world_pos, out vec3 color) {
-    vec2 source_pos = clamp(
-        world_pos / terrain.xy * source_maps.xy,
-        vec2(0.0),
-        source_maps.xy - vec2(1.0)
-    );
-    ivec2 source_cell = ivec2(floor(source_pos));
+    ivec2 source_cell = source_cell_for_world(world_pos);
     if (!source_cell_is_resident(source_cell)) {
         color = vec3(0.0);
         return false;
     }
 
-    float atlas_size = tile_info.y * tile_info.x;
-    vec2 atlas_pos = source_pos - vec2(window_min_tile() * tile_size())
-        + tile_info.zw * tile_info.x
-        + vec2(0.5);
-    if (atlas_pos.x >= atlas_size) {
-        atlas_pos.x -= atlas_size;
-    }
-    if (atlas_pos.y >= atlas_size) {
-        atlas_pos.y -= atlas_size;
-    }
-    color = textureLod(color_near_map, atlas_pos / height_maps.xy, 0.0).rgb;
+    color = texelFetch(color_near_map, ring_atlas_cell_for_source_cell(source_cell), 0).rgb;
     return true;
 }
 
@@ -184,10 +169,15 @@ float height_at(vec2 world_pos, float lod_blend) {
     return mix(near_height, far_height, lod_blend);
 }
 
-float height_sample_radius(float lod_blend) {
-    float near_cell_size = terrain.x / source_maps.x;
-    float far_cell_size = terrain.x / height_maps.z;
+vec2 height_sample_radius2(float lod_blend) {
+    vec2 near_cell_size = terrain.xy / source_maps.xy;
+    vec2 far_cell_size = terrain.xy / height_maps.zw;
     return mix(near_cell_size, far_cell_size, lod_blend);
+}
+
+float height_sample_radius(float lod_blend) {
+    vec2 sample_radius = height_sample_radius2(lod_blend);
+    return min(sample_radius.x, sample_radius.y);
 }
 
 vec3 color_at(vec2 world_pos) {
@@ -257,13 +247,17 @@ bool terrain_bounds_interval(vec3 origin, vec3 ray, out float enter_t, out float
 }
 
 vec3 terrain_normal(vec2 world_pos, float lod_blend) {
-    float sample_radius = height_sample_radius(lod_blend);
-    float h_left = height_at(world_pos - vec2(sample_radius, 0.0), lod_blend);
-    float h_right = height_at(world_pos + vec2(sample_radius, 0.0), lod_blend);
-    float h_back = height_at(world_pos - vec2(0.0, sample_radius), lod_blend);
-    float h_front = height_at(world_pos + vec2(0.0, sample_radius), lod_blend);
+    vec2 sample_radius = height_sample_radius2(lod_blend);
+    float h_left = height_at(world_pos - vec2(sample_radius.x, 0.0), lod_blend);
+    float h_right = height_at(world_pos + vec2(sample_radius.x, 0.0), lod_blend);
+    float h_back = height_at(world_pos - vec2(0.0, sample_radius.y), lod_blend);
+    float h_front = height_at(world_pos + vec2(0.0, sample_radius.y), lod_blend);
 
-    return normalize(vec3(h_left - h_right, sample_radius * 2.0, h_back - h_front));
+    return normalize(vec3(
+        (h_left - h_right) / max(sample_radius.x * 2.0, 0.0001),
+        1.0,
+        (h_back - h_front) / max(sample_radius.y * 2.0, 0.0001)
+    ));
 }
 
 float terrain_light(vec3 normal) {
@@ -360,7 +354,8 @@ vec3 debug_terrain_color(vec2 world_pos, float horizontal_dist, int hit_method, 
 }
 
 float raymarch_step_size(float horizontal_dist, float lod_blend) {
-    float near_cell_size = terrain.x / source_maps.x;
+    vec2 near_cell_size2 = terrain.xy / source_maps.xy;
+    float near_cell_size = min(near_cell_size2.x, near_cell_size2.y);
     float close_step = near_cell_size * CLOSE_TERRAIN_STEP_CELL_FACTOR;
     float near_step = 0.55 + horizontal_dist * 0.0055;
     float close_step_blend = smoothstep(
@@ -496,7 +491,7 @@ bool raycast_near_height_cells(
 
     vec2 cell_size = terrain.xy / source_maps.xy;
     vec2 start_pos = origin.xz + ray.xz * (start_t + NEAR_DDA_T_EPSILON);
-    ivec2 cell = ivec2(floor(start_pos / cell_size));
+    ivec2 cell = source_cell_for_world(start_pos);
 
     if (!near_cell_in_bounds(cell)) {
         return false;
