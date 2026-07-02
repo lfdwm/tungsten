@@ -266,6 +266,8 @@ This backdrop pass:
 
 This is meant to fill in distant scenery beyond the expensive 3D raymarch budget. It is not as precise as the main raymarch, but it is cheaper and uses the conservative max-height far map.
 
+Because the far map stores conservative max heights, the first backdrop hit can be visibly higher than the last raymarched terrain when `ray_iteration_count` is low. To reduce that visible wall on weaker hardware profiles, the backdrop raycast subtracts a small world-height-relative offset from the far height map before testing for hits. This only affects the 2D backdrop; the main raymarch still uses the unmodified height data.
+
 Current backdrop shader constants:
 
 | Constant | Value | Meaning |
@@ -275,6 +277,7 @@ Current backdrop shader constants:
 | `BACKDROP_MAX_HORIZONTAL_STEP` | `8.0` | Maximum horizontal backdrop step |
 | `BACKDROP_HIT_BIAS` | `2.0` | Allows near misses to count as hits |
 | `BACKDROP_START_BIAS` | `2.0` | Starts backdrop slightly beyond the raymarch stop |
+| `BACKDROP_HEIGHT_OFFSET_FRACTION` | `0.12` | Fraction of `height_scale` subtracted from backdrop height samples |
 
 ## Lighting, Normals, and Fog
 

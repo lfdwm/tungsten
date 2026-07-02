@@ -43,6 +43,7 @@ const float BACKDROP_MIN_HORIZONTAL_STEP = 0.5;
 const float BACKDROP_MAX_HORIZONTAL_STEP = 8.0;
 const float BACKDROP_HIT_BIAS = 2.0;
 const float BACKDROP_START_BIAS = 2.0;
+const float BACKDROP_HEIGHT_OFFSET_FRACTION = 0.005;
 const int DEBUG_NONE = 0;
 const int DEBUG_HEIGHT_SOURCES = 1;
 const int DEBUG_HIT_METHODS = 2;
@@ -699,7 +700,8 @@ float backdrop_height_margin(vec3 origin, vec3 ray, float ray_horizontal, float 
     float t = horizontal_dist / ray_horizontal;
     vec2 world_pos = origin.xz + ray.xz * t;
     float ray_height = origin.y + ray.y * t;
-    float terrain_height = height_cell(height_far_map, world_pos, height_maps.zw);
+    float far_height = height_cell(height_far_map, world_pos, height_maps.zw);
+    float terrain_height = max(far_height - render.w * BACKDROP_HEIGHT_OFFSET_FRACTION, 0.0);
 
     return terrain_height - ray_height;
 }
