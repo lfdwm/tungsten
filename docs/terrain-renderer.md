@@ -2,9 +2,11 @@
 
 This document describes the current terrain renderer in `tungsten`. The renderer is VoxelSpace-inspired, but implemented as a full-screen GPU fragment shader that raycasts/raymarches a height field rather than drawing terrain columns on the CPU.
 
-The main implementation points are:
-
-- Rust runtime: `src/main.rs`
+- Main loop and app orchestration: `src/main.rs`
+- Runtime config parsing: `src/config.rs`
+- Camera, replay, and player movement: `src/camera.rs`
+- Render-pass orchestration: `src/renderer.rs`
+- Terrain data, tile streaming, and collision height field: `src/terrain.rs`
 - Terrain fragment shader: `shaders/voxelspace.frag`
 - Upscale and overlay shader: `shaders/upscale.frag`
 - Runtime settings: `config.toml`
@@ -13,10 +15,12 @@ The main implementation points are:
 
 ```mermaid
 flowchart TD
-    CPU[main.rs] --> LoadMaps[Load worldmap manifest, far maps, and near tile atlases]
+    CPU[main.rs] --> Renderer[src/renderer.rs]
+    CPU --> Terrain[src/terrain.rs]
+    Terrain --> LoadMaps[Load worldmap manifest, far maps, and near tile atlases]
     LoadMaps --> GPUTextures[GPU textures and samplers]
-    CPU --> Config[config.toml]
-    CPU --> Uniforms[ShaderParams uniform buffer]
+    CPU --> Config[src/config.rs + config.toml]
+    Renderer --> Uniforms[ShaderParams uniform buffer]
     Config --> Uniforms
     GPUTextures --> TerrainShader[voxelspace.frag]
     Uniforms --> TerrainShader
@@ -312,7 +316,7 @@ Fog mixes terrain color toward sky based on horizontal hit distance and `camera.
 
 Runtime settings live in `config.toml`. The parser is intentionally flat: tables are not supported, and each key is written as `key = value`.
 
-Missing keys use built-in defaults from `src/main.rs`.
+Missing keys use built-in defaults from `src/config.rs`.
 
 | Key | Default | Valid range / values | Effect |
 | --- | ---: | --- | --- |
