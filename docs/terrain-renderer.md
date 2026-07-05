@@ -24,12 +24,14 @@ flowchart TD
     Config --> Uniforms
     GPUTextures --> TerrainShader[voxelspace.frag]
     Uniforms --> TerrainShader
-    TerrainShader --> LowResTarget[Offscreen render target]
-    LowResTarget --> Upscale[upscale.frag]
+    TerrainShader --> LowResColor[Offscreen color target]
+    TerrainShader --> LowResDepth[Offscreen linear depth target]
+    LowResColor --> Upscale[upscale.frag]
+    LowResDepth --> Upscale
     Upscale --> Swapchain[Window swapchain]
 ```
 
-The app renders the terrain into an offscreen color target whose size is controlled by `performance_render_scale`. The result is then nearest-neighbor upscaled to the swapchain. The upscale pass also draws the FPS and frame-time overlay.
+The app renders the terrain into offscreen color and normalized linear depth targets whose size is controlled by `performance_render_scale`. The color result is then nearest-neighbor upscaled to the swapchain. The depth target is sampled by the upscale pass for the depth debug view and is available for later passes. The upscale pass also draws the FPS and frame-time overlay.
 
 ## Terrain Assets
 
@@ -356,6 +358,7 @@ No debug visuals
 -> Height source colors
 -> Ray / hit method colors
 -> Normal lighting mode colors
+-> Linear depth grayscale
 -> No debug visuals
 ```
 
@@ -384,6 +387,14 @@ Normal lighting colors:
 | Green | Detailed sampled terrain normals |
 | Yellow | Blending from detailed normals to flat far light |
 | Red | Flat far terrain light |
+
+Depth grayscale:
+
+| Color | Meaning |
+| --- | --- |
+| White | Near terrain |
+| Gray | Increasing normalized linear view depth |
+| Black | Far terrain and sky |
 
 ## Collision and Gravity Mode
 

@@ -35,7 +35,7 @@ Press `G` to toggle between freecam and gravity/player movement.
 
 In gravity mode, `WASD` moves along the terrain and `Space` jumps. Scroll adjusts camera height, and `Shift` + scroll adjusts movement speed. Freecam keeps the original controls.
 
-When `render_debug_visuals` is enabled, `F3` cycles through no debug view, height source colors, ray/hit method colors, and normal-lighting mode colors.
+When `render_debug_visuals` is enabled, `F3` cycles through no debug view, height source colors, ray/hit method colors, normal-lighting mode colors, and depth output.
 
 Press `F11` to start recording a camera trace, and press `F11` again to stop. Recordings are written under `recordings/` as TSV files with `frame x y height yaw pitch` samples every 10 submitted frames.
 

@@ -1,13 +1,17 @@
 #version 450
 
 layout(set = 2, binding = 0) uniform sampler2D source_texture;
+layout(set = 2, binding = 1) uniform sampler2D linear_depth_texture;
 
 layout(set = 3, binding = 0) uniform UpscaleParams {
     vec4 overlay;
+    vec4 debug;
 };
 
 layout(location = 0) in vec2 frag_uv;
 layout(location = 0) out vec4 out_color;
+
+const int DEBUG_DEPTH = 4;
 
 int glyph_row_bits(int glyph, int row) {
     if (glyph == 0) {
@@ -200,7 +204,15 @@ vec3 overlay_fps(vec3 color, vec2 screen_px) {
 }
 
 void main() {
-    vec3 color = textureLod(source_texture, vec2(frag_uv.x, 1.0 - frag_uv.y), 0.0).rgb;
+    vec2 source_uv = vec2(frag_uv.x, 1.0 - frag_uv.y);
+    vec3 color = textureLod(source_texture, source_uv, 0.0).rgb;
+    int debug_mode = int(debug.x + 0.5);
+
+    if (debug_mode == DEBUG_DEPTH) {
+        float depth = clamp(textureLod(linear_depth_texture, source_uv, 0.0).r, 0.0, 1.0);
+        color = vec3(1.0 - depth);
+    }
+
     vec2 screen_px = vec2(frag_uv.x * overlay.y, (1.0 - frag_uv.y) * overlay.z);
     out_color = vec4(overlay_fps(color, screen_px), 1.0);
 }

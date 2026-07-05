@@ -24,6 +24,7 @@ layout(set = 3, binding = 0) uniform Params {
 
 layout(location = 0) in vec2 frag_uv;
 layout(location = 0) out vec4 out_color;
+layout(location = 1) out float out_linear_depth;
 
 const float FAR_TERRAIN_LIGHT = 0.84;
 const int MAX_RAY_ITERATIONS = 4096;
@@ -48,6 +49,7 @@ const int DEBUG_NONE = 0;
 const int DEBUG_HEIGHT_SOURCES = 1;
 const int DEBUG_HIT_METHODS = 2;
 const int DEBUG_NORMAL_LIGHTING = 3;
+const int DEBUG_DEPTH = 4;
 const float DEBUG_COLOR_BLEND = 0.5;
 const int HIT_METHOD_NONE = 0;
 const int HIT_METHOD_NEAR_DDA = 1;
@@ -197,6 +199,14 @@ vec3 sky_color(float ray_y) {
 
 vec3 camera_origin() {
     return vec3(camera.x, camera.z, camera.y);
+}
+
+float normalized_linear_view_depth(vec3 point) {
+    float view_depth = dot(point - camera_origin(), ray_forward.xyz);
+    float near_depth = raymarch.y;
+    float far_depth = max(raymarch.z, near_depth + 0.0001);
+
+    return clamp((view_depth - near_depth) / (far_depth - near_depth), 0.0, 1.0);
 }
 
 vec3 ray_direction(vec2 screen_uv) {
@@ -778,11 +788,12 @@ void main() {
         int mode = debug_mode();
         float fog = smoothstep(raymarch.z * 0.62, raymarch.z, hit_horizontal_dist);
         vec3 color = mix(terrain_color(hit_pos, hit_horizontal_dist), sky, fog * 0.86);
-        if (mode != DEBUG_NONE) {
+        if (mode != DEBUG_NONE && mode != DEBUG_DEPTH) {
             vec3 debug_color = debug_terrain_color(hit_pos.xz, hit_horizontal_dist, hit_method, false);
             color = mix(color, debug_color, DEBUG_COLOR_BLEND);
         }
         out_color = vec4(color, 1.0);
+        out_linear_depth = normalized_linear_view_depth(hit_pos);
     } else if (backdrop_available && raycast_backdrop(
         origin,
         ray,
@@ -794,12 +805,14 @@ void main() {
         int mode = debug_mode();
         float fog = smoothstep(raymarch.z * 0.45, raymarch.z, hit_horizontal_dist);
         vec3 color = mix(backdrop_terrain_color(hit_pos, hit_horizontal_dist), sky, fog * 0.9);
-        if (mode != DEBUG_NONE) {
+        if (mode != DEBUG_NONE && mode != DEBUG_DEPTH) {
             vec3 debug_color = debug_terrain_color(hit_pos.xz, hit_horizontal_dist, HIT_METHOD_BACKDROP, true);
             color = mix(color, debug_color, DEBUG_COLOR_BLEND);
         }
         out_color = vec4(color, 1.0);
+        out_linear_depth = normalized_linear_view_depth(hit_pos);
     } else {
         out_color = vec4(sky, 1.0);
+        out_linear_depth = 1.0;
     }
 }

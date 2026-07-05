@@ -14,6 +14,7 @@ use sdl3::{
 use crate::{camera::Camera, config::AppConfig, terrain::TerrainMaps};
 
 const RAYMARCH_START_DISTANCE: f32 = 0.05;
+const DEPTH_TARGET_FORMAT: TextureFormat = TextureFormat::R32Float;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -38,10 +39,12 @@ struct ShaderParams {
 #[derive(Clone, Copy)]
 struct UpscaleParams {
     overlay: [f32; 4],
+    debug: [f32; 4],
 }
 
 struct RenderTarget {
-    texture: Texture<'static>,
+    color_texture: Texture<'static>,
+    depth_texture: Texture<'static>,
     width: u32,
     height: u32,
 }
@@ -52,6 +55,7 @@ pub(crate) enum DebugVisualMode {
     HeightSources,
     HitMethods,
     NormalLighting,
+    Depth,
 }
 
 impl DebugVisualMode {
@@ -60,7 +64,8 @@ impl DebugVisualMode {
             Self::None => Self::HeightSources,
             Self::HeightSources => Self::HitMethods,
             Self::HitMethods => Self::NormalLighting,
-            Self::NormalLighting => Self::None,
+            Self::NormalLighting => Self::Depth,
+            Self::Depth => Self::None,
         }
     }
 
@@ -70,6 +75,7 @@ impl DebugVisualMode {
             Self::HeightSources => 1.0,
             Self::HitMethods => 2.0,
             Self::NormalLighting => 3.0,
+            Self::Depth => 4.0,
         }
     }
 
@@ -79,6 +85,7 @@ impl DebugVisualMode {
             Self::HeightSources => "height sources",
             Self::HitMethods => "ray/hit methods",
             Self::NormalLighting => "normal lighting",
+            Self::Depth => "depth",
         }
     }
 
@@ -94,6 +101,7 @@ impl DebugVisualMode {
             Self::NormalLighting => {
                 "  green: detailed sampled normals\n  yellow: detailed-to-flat lighting blend\n  red: flat far terrain light"
             }
+            Self::Depth => "  white: near terrain\n  black: far terrain and sky",
         }
     }
 }
@@ -157,11 +165,18 @@ impl Renderer {
             debug_visual_mode,
         );
 
-        let color_targets = [ColorTargetInfo::default()
-            .with_texture(&render_target.texture)
-            .with_load_op(LoadOp::CLEAR)
-            .with_store_op(StoreOp::STORE)
-            .with_clear_color(Color::RGB(105, 136, 157))];
+        let color_targets = [
+            ColorTargetInfo::default()
+                .with_texture(&render_target.color_texture)
+                .with_load_op(LoadOp::CLEAR)
+                .with_store_op(StoreOp::STORE)
+                .with_clear_color(Color::RGB(105, 136, 157)),
+            ColorTargetInfo::default()
+                .with_texture(&render_target.depth_texture)
+                .with_load_op(LoadOp::CLEAR)
+                .with_store_op(StoreOp::STORE)
+                .with_clear_color(Color::RGB(255, 255, 255)),
+        ];
 
         let render_pass = gpu.begin_render_pass(&command_buffer, &color_targets, None)?;
         render_pass.bind_graphics_pipeline(&self.terrain_pipeline);
@@ -187,7 +202,12 @@ impl Renderer {
         gpu.end_render_pass(render_pass);
 
         if let Ok(swapchain) = command_buffer.wait_and_acquire_swapchain_texture(window) {
-            let upscale_params = upscale_params(overlay, swapchain.width(), swapchain.height());
+            let upscale_params = upscale_params(
+                overlay,
+                swapchain.width(),
+                swapchain.height(),
+                debug_visual_mode,
+            );
             let color_targets = [ColorTargetInfo::default()
                 .with_texture(&swapchain)
                 .with_load_op(LoadOp::CLEAR)
@@ -198,9 +218,14 @@ impl Renderer {
             upscale_pass.bind_graphics_pipeline(&self.upscale_pipeline);
             upscale_pass.bind_fragment_samplers(
                 0,
-                &[TextureSamplerBinding::new()
-                    .with_texture(&render_target.texture)
-                    .with_sampler(&self.upscale_sampler)],
+                &[
+                    TextureSamplerBinding::new()
+                        .with_texture(&render_target.color_texture)
+                        .with_sampler(&self.upscale_sampler),
+                    TextureSamplerBinding::new()
+                        .with_texture(&render_target.depth_texture)
+                        .with_sampler(&self.upscale_sampler),
+                ],
             );
             command_buffer.push_fragment_uniform_data(0, &upscale_params);
             upscale_pass.draw_primitives(3, 1, 0, 0);
@@ -250,6 +275,7 @@ fn create_terrain_pipeline(
         .with_target_info(
             GraphicsPipelineTargetInfo::new().with_color_target_descriptions(&[
                 ColorTargetDescription::new().with_format(target_format),
+                ColorTargetDescription::new().with_format(DEPTH_TARGET_FORMAT),
             ]),
         )
         .build()?;
@@ -278,7 +304,7 @@ fn create_upscale_pipeline(
             include_bytes!(concat!(env!("OUT_DIR"), "/upscale.frag.spv")),
             ShaderStage::Fragment,
         )
-        .with_samplers(1)
+        .with_samplers(2)
         .with_uniform_buffers(1)
         .with_entrypoint(c"main")
         .build()?;
@@ -299,9 +325,15 @@ fn create_upscale_pipeline(
     Ok(pipeline)
 }
 
-fn upscale_params(overlay: OverlayStats, width: u32, height: u32) -> UpscaleParams {
+fn upscale_params(
+    overlay: OverlayStats,
+    width: u32,
+    height: u32,
+    debug_visual_mode: DebugVisualMode,
+) -> UpscaleParams {
     UpscaleParams {
         overlay: [overlay.fps, width as f32, height as f32, overlay.frame_ms],
+        debug: [debug_visual_mode.as_shader_value(), 0.0, 0.0, 0.0],
     }
 }
 
@@ -326,7 +358,8 @@ fn ensure_render_target(
 
     if needs_recreate {
         *render_target = Some(RenderTarget {
-            texture: create_color_target_texture(gpu, width, height, format)?,
+            color_texture: create_color_target_texture(gpu, width, height, format)?,
+            depth_texture: create_color_target_texture(gpu, width, height, DEPTH_TARGET_FORMAT)?,
             width,
             height,
         });
@@ -499,5 +532,29 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
         [v[0] / length, v[1] / length, v[2] / length]
     } else {
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cycles_debug_visual_modes_including_depth() {
+        assert_eq!(DebugVisualMode::None.next(), DebugVisualMode::HeightSources);
+        assert_eq!(
+            DebugVisualMode::HeightSources.next(),
+            DebugVisualMode::HitMethods
+        );
+        assert_eq!(
+            DebugVisualMode::HitMethods.next(),
+            DebugVisualMode::NormalLighting
+        );
+        assert_eq!(
+            DebugVisualMode::NormalLighting.next(),
+            DebugVisualMode::Depth
+        );
+        assert_eq!(DebugVisualMode::Depth.next(), DebugVisualMode::None);
+        assert_eq!(DebugVisualMode::Depth.as_shader_value(), 4.0);
     }
 }
