@@ -9,6 +9,8 @@ use std::{
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=shaders/fullscreen.vert");
     println!("cargo:rerun-if-changed=shaders/voxelspace.frag");
+    println!("cargo:rerun-if-changed=shaders/raster_cube.vert");
+    println!("cargo:rerun-if-changed=shaders/raster_cube.frag");
     println!("cargo:rerun-if-changed=shaders/upscale.frag");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
@@ -19,6 +21,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     compile_shader(
         "shaders/voxelspace.frag",
         out_dir.join("voxelspace.frag.spv"),
+    )?;
+    compile_shader(
+        "shaders/raster_cube.vert",
+        out_dir.join("raster_cube.vert.spv"),
+    )?;
+    compile_shader(
+        "shaders/raster_cube.frag",
+        out_dir.join("raster_cube.frag.spv"),
     )?;
     compile_shader("shaders/upscale.frag", out_dir.join("upscale.frag.spv"))?;
 

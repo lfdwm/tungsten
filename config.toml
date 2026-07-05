@@ -8,6 +8,12 @@ start_x = 1900.0
 start_y = 4460.0
 start_height = 250.0
 
+raster_cube_enabled = true
+raster_cube_x = 1965.0
+raster_cube_y = 4315.0
+raster_cube_height = 230.0
+raster_cube_size = 96.0
+
 # [ Platladan ]
 # present_mode = "vsync"
 # max_framerate = 200.0

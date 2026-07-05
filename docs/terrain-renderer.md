@@ -8,6 +8,7 @@ This document describes the current terrain renderer in `tungsten`. The renderer
 - Render-pass orchestration: `src/renderer.rs`
 - Terrain data, tile streaming, and collision height field: `src/terrain.rs`
 - Terrain fragment shader: `shaders/voxelspace.frag`
+- Raster cube shaders: `shaders/raster_cube.vert`, `shaders/raster_cube.frag`
 - Upscale and overlay shader: `shaders/upscale.frag`
 - Runtime settings: `config.toml`
 
@@ -25,13 +26,20 @@ flowchart TD
     GPUTextures --> TerrainShader[voxelspace.frag]
     Uniforms --> TerrainShader
     TerrainShader --> LowResColor[Offscreen color target]
-    TerrainShader --> LowResDepth[Offscreen linear depth target]
+    TerrainShader --> TerrainDepth[Terrain-only linear depth target]
+    TerrainShader --> SceneDepth[Scene linear depth target]
+    Config --> RasterCube[Raster cube pass]
+    TerrainDepth --> RasterCube
+    LowResColor --> RasterCube
+    SceneDepth --> RasterCube
+    RasterCube --> LowResColor
+    RasterCube --> SceneDepth
     LowResColor --> Upscale[upscale.frag]
-    LowResDepth --> Upscale
+    SceneDepth --> Upscale
     Upscale --> Swapchain[Window swapchain]
 ```
 
-The app renders the terrain into offscreen color and normalized linear depth targets whose size is controlled by `performance_render_scale`. The color result is then nearest-neighbor upscaled to the swapchain. The depth target is sampled by the upscale pass for the depth debug view and is available for later passes. The upscale pass also draws the FPS and frame-time overlay.
+The app renders the terrain into offscreen color, terrain-only normalized linear depth, and scene normalized linear depth targets whose size is controlled by `performance_render_scale`. The optional raster cube pass runs before upscale, samples terrain depth for visibility, and writes cube color plus updated scene depth. The color result is then nearest-neighbor upscaled to the swapchain. The scene depth target is sampled by the upscale pass for the depth debug view and is available for later passes. The upscale pass also draws the FPS and frame-time overlay.
 
 ## Terrain Assets
 
@@ -314,6 +322,12 @@ The 2D backdrop uses the same lighting function. If a backdrop hit is before `no
 
 Fog mixes terrain color toward sky based on horizontal hit distance and `camera.max_distance`.
 
+## Raster Cube Pass
+
+When `raster_cube_enabled` is true, `src/renderer.rs` draws a single static cube after terrain rendering and before the upscale pass. The cube vertex shader uses the same camera origin, ray basis, vertical FoV, near distance, and `camera.max_distance` depth normalization as the terrain shader.
+
+The raster pass uses a cube-only hardware depth target for cube self-occlusion. The fragment shader applies basic Phong shading and samples the terrain-only depth texture at the cube fragment's screen position. If the terrain depth is nearer than the cube depth, the cube fragment is discarded. Surviving cube fragments write over the offscreen color target and update the scene depth target. Later passes should sample scene depth when they want visibility for terrain plus raster geometry, and terrain depth when they specifically need terrain-only visibility.
+
 ## Runtime Config
 
 Runtime settings live in `config.toml`. The parser is intentionally flat: tables are not supported, and each key is written as `key = value`.
@@ -329,6 +343,11 @@ Missing keys use built-in defaults from `src/config.rs`.
 | `present_mode` | `"vsync"` | `"vsync"`, `"immediate"`, `"mailbox"` | SDL GPU swapchain present mode. |
 | `max_framerate` | `0.0` | `>= 0.0` | CPU-side framerate cap. `0.0` means unlimited. |
 | `render_debug_visuals` | `false` | `true` or `false` | Enables cycling terrain debug views with `F3`. |
+| `raster_cube_enabled` | `false` | `true` or `false` | Draws a Phong-shaded test cube between terrain rendering and upscale. |
+| `raster_cube_x` | `320.0` | `>= 0.0` | Test cube center X coordinate in world units. |
+| `raster_cube_y` | `240.0` | `>= 0.0` | Test cube center Y coordinate in world units, mapped to shader Z. |
+| `raster_cube_height` | `120.0` | `>= 0.0` | Test cube center height in world units. |
+| `raster_cube_size` | `64.0` | `> 0.0` | Test cube edge length in world units. |
 | `near_dda_distance` | `512.0` | `> 0.0` | Horizontal distance covered by near detailed DDA before main raymarching. |
 | `near_dda_max_steps` | `1024` | `1..4096` | Maximum resident near-height cells the DDA may traverse before handing off to the main raymarch. |
 | `start_x` | `250.0` | `>= 0.0` | Initial camera/player X coordinate. |
@@ -358,7 +377,7 @@ No debug visuals
 -> Height source colors
 -> Ray / hit method colors
 -> Normal lighting mode colors
--> Linear depth grayscale
+-> Scene depth grayscale
 -> No debug visuals
 ```
 
@@ -388,13 +407,13 @@ Normal lighting colors:
 | Yellow | Blending from detailed normals to flat far light |
 | Red | Flat far terrain light |
 
-Depth grayscale:
+Scene depth grayscale:
 
 | Color | Meaning |
 | --- | --- |
-| White | Near terrain |
+| White | Near terrain or raster geometry |
 | Gray | Increasing normalized linear view depth |
-| Black | Far terrain and sky |
+| Black | Far terrain, far raster geometry, and sky |
 
 ## Collision and Gravity Mode
 

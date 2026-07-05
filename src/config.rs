@@ -22,6 +22,11 @@ const DEFAULT_PERFORMANCE_RENDER_SCALE: f32 = 0.5;
 const DEFAULT_PRESENT_MODE: AppPresentMode = AppPresentMode::Vsync;
 const DEFAULT_MAX_FRAMERATE: f32 = 0.0;
 const DEFAULT_RENDER_DEBUG_VISUALS: bool = false;
+const DEFAULT_RASTER_CUBE_ENABLED: bool = false;
+const DEFAULT_RASTER_CUBE_X: f32 = 320.0;
+const DEFAULT_RASTER_CUBE_Y: f32 = 240.0;
+const DEFAULT_RASTER_CUBE_HEIGHT: f32 = 120.0;
+const DEFAULT_RASTER_CUBE_SIZE: f32 = 64.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AppConfig {
@@ -32,6 +37,11 @@ pub(crate) struct AppConfig {
     pub(crate) present_mode: AppPresentMode,
     pub(crate) max_framerate: f32,
     pub(crate) render_debug_visuals: bool,
+    pub(crate) raster_cube_enabled: bool,
+    pub(crate) raster_cube_x: f32,
+    pub(crate) raster_cube_y: f32,
+    pub(crate) raster_cube_height: f32,
+    pub(crate) raster_cube_size: f32,
     pub(crate) near_dda_distance: f32,
     pub(crate) near_dda_max_steps: u32,
     pub(crate) start_x: f32,
@@ -78,6 +88,11 @@ impl Default for AppConfig {
             present_mode: DEFAULT_PRESENT_MODE,
             max_framerate: DEFAULT_MAX_FRAMERATE,
             render_debug_visuals: DEFAULT_RENDER_DEBUG_VISUALS,
+            raster_cube_enabled: DEFAULT_RASTER_CUBE_ENABLED,
+            raster_cube_x: DEFAULT_RASTER_CUBE_X,
+            raster_cube_y: DEFAULT_RASTER_CUBE_Y,
+            raster_cube_height: DEFAULT_RASTER_CUBE_HEIGHT,
+            raster_cube_size: DEFAULT_RASTER_CUBE_SIZE,
             near_dda_distance: DEFAULT_NEAR_DDA_DISTANCE,
             near_dda_max_steps: DEFAULT_NEAR_DDA_MAX_STEPS,
             start_x: DEFAULT_START_X,
@@ -161,6 +176,21 @@ impl AppConfig {
                 "render_debug_visuals" => {
                     config.render_debug_visuals = parse_config_bool(key, value, line_number)?
                 }
+                "raster_cube_enabled" => {
+                    config.raster_cube_enabled = parse_config_bool(key, value, line_number)?
+                }
+                "raster_cube_x" => {
+                    config.raster_cube_x = parse_config_f32(key, value, line_number)?
+                }
+                "raster_cube_y" => {
+                    config.raster_cube_y = parse_config_f32(key, value, line_number)?
+                }
+                "raster_cube_height" => {
+                    config.raster_cube_height = parse_config_f32(key, value, line_number)?
+                }
+                "raster_cube_size" => {
+                    config.raster_cube_size = parse_config_f32(key, value, line_number)?
+                }
                 "near_dda_distance" => {
                     config.near_dda_distance = parse_config_f32(key, value, line_number)?
                 }
@@ -222,6 +252,15 @@ impl AppConfig {
         }
         if self.start_x < 0.0 || self.start_y < 0.0 || self.start_height < 0.0 {
             return Err("`start_x`, `start_y`, and `start_height` must be non-negative".to_owned());
+        }
+        if self.raster_cube_x < 0.0 || self.raster_cube_y < 0.0 || self.raster_cube_height < 0.0 {
+            return Err(
+                "`raster_cube_x`, `raster_cube_y`, and `raster_cube_height` must be non-negative"
+                    .to_owned(),
+            );
+        }
+        if self.raster_cube_size <= 0.0 {
+            return Err("`raster_cube_size` must be greater than 0.0".to_owned());
         }
         validate_blend_range(
             "height_lod",
@@ -337,6 +376,11 @@ mod tests {
             present_mode = "mailbox"
             max_framerate = 120.0
             render_debug_visuals = true
+            raster_cube_enabled = true
+            raster_cube_x = 321.0
+            raster_cube_y = 654.0
+            raster_cube_height = 87.0
+            raster_cube_size = 48.0
             near_dda_distance = 96.0
             near_dda_max_steps = 128
             start_x = 123.0
@@ -358,6 +402,11 @@ mod tests {
         assert_eq!(config.present_mode, AppPresentMode::Mailbox);
         assert_eq!(config.max_framerate, 120.0);
         assert!(config.render_debug_visuals);
+        assert!(config.raster_cube_enabled);
+        assert_eq!(config.raster_cube_x, 321.0);
+        assert_eq!(config.raster_cube_y, 654.0);
+        assert_eq!(config.raster_cube_height, 87.0);
+        assert_eq!(config.raster_cube_size, 48.0);
         assert_eq!(config.near_dda_distance, 96.0);
         assert_eq!(config.near_dda_max_steps, 128);
         assert_eq!(config.start_x, 123.0);
@@ -462,6 +511,30 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("render_debug_visuals"));
+
+        let error = AppConfig::parse(
+            r#"
+            raster_cube_enabled = maybe
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("raster_cube_enabled"));
+
+        let error = AppConfig::parse(
+            r#"
+            raster_cube_x = -1.0
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("raster_cube_x"));
+
+        let error = AppConfig::parse(
+            r#"
+            raster_cube_size = 0.0
+            "#,
+        )
+        .unwrap_err();
+        assert!(error.contains("raster_cube_size"));
 
         let error = AppConfig::parse(
             r#"

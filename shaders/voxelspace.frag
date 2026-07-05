@@ -25,6 +25,7 @@ layout(set = 3, binding = 0) uniform Params {
 layout(location = 0) in vec2 frag_uv;
 layout(location = 0) out vec4 out_color;
 layout(location = 1) out float out_linear_depth;
+layout(location = 2) out float out_scene_depth;
 
 const float FAR_TERRAIN_LIGHT = 0.84;
 const int MAX_RAY_ITERATIONS = 4096;
@@ -794,6 +795,7 @@ void main() {
         }
         out_color = vec4(color, 1.0);
         out_linear_depth = normalized_linear_view_depth(hit_pos);
+        out_scene_depth = out_linear_depth;
     } else if (backdrop_available && raycast_backdrop(
         origin,
         ray,
@@ -811,8 +813,10 @@ void main() {
         }
         out_color = vec4(color, 1.0);
         out_linear_depth = normalized_linear_view_depth(hit_pos);
+        out_scene_depth = out_linear_depth;
     } else {
         out_color = vec4(sky, 1.0);
         out_linear_depth = 1.0;
+        out_scene_depth = out_linear_depth;
     }
 }
