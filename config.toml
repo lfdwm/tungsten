@@ -22,7 +22,7 @@ start_height = 250.0
 # normal_detail_blend_end = 1000.0
 
 # [ Dunderklumpen ]
-present_mode = "vsync"
+present_mode = "immmediate"
 max_framerate = 200.0
 performance_render_scale = 0.33
 tile_cache_radius = 1
