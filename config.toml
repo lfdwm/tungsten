@@ -1,5 +1,6 @@
 # Runtime terrain rendering knobs.
-worldmap = "assets/worldmaps/continent/manifest.toml"
+#worldmap = "assets/worldmaps/continent/manifest.toml"
+worldmap = "assets/worldmaps/continent_32k/manifest.toml"
 
 render_debug_visuals = true
 
@@ -8,27 +9,27 @@ start_y = 4460.0
 start_height = 250.0
 
 # [ Platladan ]
-present_mode = "vsync"
-max_framerate = 200.0
-performance_render_scale = 0.5
-tile_cache_radius = 1
-ray_iteration_count = 100
-near_dda_distance = 512.0
-near_dda_max_steps = 1024
-height_lod_blend_start = 250.0
-height_lod_blend_end = 600.0
-normal_detail_blend_start = 500.0
-normal_detail_blend_end = 1000.0
-
-# [ Dunderklumpen ]
-# present_mode = "immediate"
+# present_mode = "vsync"
 # max_framerate = 200.0
-# performance_render_scale = 0.4
+# performance_render_scale = 0.5
 # tile_cache_radius = 1
-# ray_iteration_count = 175
-# near_dda_distance = 32.0
-# near_dda_max_steps = 128
-# height_lod_blend_start = 200.0
-# height_lod_blend_end = 328.0
+# ray_iteration_count = 100
+# near_dda_distance = 512.0
+# near_dda_max_steps = 1024
+# height_lod_blend_start = 250.0
+# height_lod_blend_end = 600.0
 # normal_detail_blend_start = 500.0
 # normal_detail_blend_end = 1000.0
+
+# [ Dunderklumpen ]
+present_mode = "vsync"
+max_framerate = 200.0
+performance_render_scale = 0.4
+tile_cache_radius = 1
+ray_iteration_count = 175
+near_dda_distance = 32.0
+near_dda_max_steps = 128
+height_lod_blend_start = 200.0
+height_lod_blend_end = 328.0
+normal_detail_blend_start = 500.0
+normal_detail_blend_end = 1000.0

@@ -112,7 +112,7 @@ fn parse_size(size: OsString) -> Result<Size, Box<dyn Error>> {
 }
 
 fn upsample_colormap(args: &Args) -> Result<(), Box<dyn Error>> {
-    let input = image::open(&args.input)?.to_rgba8();
+    let input = read_input_rgba(&args.input)?;
     let input_size = Size {
         width: input.width() as usize,
         height: input.height() as usize,
@@ -120,6 +120,17 @@ fn upsample_colormap(args: &Args) -> Result<(), Box<dyn Error>> {
 
     validate_sizes(&input_size, &args.output_size)?;
     write_upsampled_png(&input, &input_size, &args.output, &args.output_size)
+}
+
+fn read_input_rgba(path: &Path) -> Result<RgbaImage, Box<dyn Error>> {
+    let mut reader = image::ImageReader::open(path)
+        .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+    reader.no_limits();
+
+    Ok(reader
+        .decode()
+        .map_err(|error| format!("failed to decode {}: {error}", path.display()))?
+        .to_rgba8())
 }
 
 fn validate_sizes(input_size: &Size, output_size: &Size) -> Result<(), Box<dyn Error>> {
