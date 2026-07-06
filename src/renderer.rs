@@ -2,20 +2,24 @@ use std::{error::Error, mem::size_of};
 
 use sdl3::{
     gpu::{
-        Buffer, BufferBinding, BufferRegion, BufferUsageFlags, ColorTargetDescription,
-        ColorTargetInfo, CompareOp, CopyPass, CullMode, DepthStencilState, DepthStencilTargetInfo,
-        Device, FillMode, Filter, GraphicsPipeline, GraphicsPipelineTargetInfo, IndexElementSize,
-        LoadOp, PrimitiveType, RasterizerState, Sampler, SamplerAddressMode, SamplerCreateInfo,
-        SamplerMipmapMode, ShaderFormat, ShaderStage, StoreOp, Texture, TextureCreateInfo,
-        TextureFormat, TextureSamplerBinding, TextureType, TextureUsage, TransferBuffer,
-        TransferBufferLocation, TransferBufferUsage, VertexAttribute, VertexBufferDescription,
-        VertexElementFormat, VertexInputRate, VertexInputState,
+        BufferBinding, ColorTargetDescription, ColorTargetInfo, CompareOp, CullMode,
+        DepthStencilState, DepthStencilTargetInfo, Device, FillMode, Filter, GraphicsPipeline,
+        GraphicsPipelineTargetInfo, IndexElementSize, LoadOp, PrimitiveType, RasterizerState,
+        Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode, ShaderFormat,
+        ShaderStage, StoreOp, Texture, TextureCreateInfo, TextureFormat, TextureSamplerBinding,
+        TextureType, TextureUsage, VertexAttribute, VertexBufferDescription, VertexElementFormat,
+        VertexInputRate, VertexInputState,
     },
     pixels::Color,
     video::Window,
 };
 
-use crate::{camera::Camera, config::AppConfig, terrain::TerrainMaps};
+use crate::{
+    camera::Camera,
+    config::AppConfig,
+    raster_model::{RasterModelCpu, RasterModelGpu, RasterVertex, create_raster_model_sampler},
+    terrain::TerrainMaps,
+};
 
 const RAYMARCH_START_DISTANCE: f32 = 0.05;
 const DEPTH_TARGET_FORMAT: TextureFormat = TextureFormat::R32Float;
@@ -49,20 +53,17 @@ struct UpscaleParams {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct RasterCubeParams {
+struct RasterParams {
     camera: [f32; 4],
     render: [f32; 4],
-    cube: [f32; 4],
+    model: [f32; 4],
+    rotation: [f32; 4],
+    material_diffuse: [f32; 4],
+    material_specular: [f32; 4],
+    material_flags: [f32; 4],
     ray_forward: [f32; 4],
     ray_right: [f32; 4],
     ray_up: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CubeVertex {
-    position: [f32; 3],
-    normal: [f32; 3],
 }
 
 struct RenderTarget {
@@ -73,122 +74,6 @@ struct RenderTarget {
     width: u32,
     height: u32,
 }
-
-struct CubeMesh {
-    vertex_buffer: Buffer,
-    index_buffer: Buffer,
-    index_count: u32,
-}
-
-const CUBE_VERTICES: &[CubeVertex] = &[
-    // +Z face
-    CubeVertex {
-        position: [-0.5, -0.5, 0.5],
-        normal: [0.0, 0.0, 1.0],
-    },
-    CubeVertex {
-        position: [0.5, -0.5, 0.5],
-        normal: [0.0, 0.0, 1.0],
-    },
-    CubeVertex {
-        position: [0.5, 0.5, 0.5],
-        normal: [0.0, 0.0, 1.0],
-    },
-    CubeVertex {
-        position: [-0.5, 0.5, 0.5],
-        normal: [0.0, 0.0, 1.0],
-    },
-    // -Z face
-    CubeVertex {
-        position: [0.5, -0.5, -0.5],
-        normal: [0.0, 0.0, -1.0],
-    },
-    CubeVertex {
-        position: [-0.5, -0.5, -0.5],
-        normal: [0.0, 0.0, -1.0],
-    },
-    CubeVertex {
-        position: [-0.5, 0.5, -0.5],
-        normal: [0.0, 0.0, -1.0],
-    },
-    CubeVertex {
-        position: [0.5, 0.5, -0.5],
-        normal: [0.0, 0.0, -1.0],
-    },
-    // +X face
-    CubeVertex {
-        position: [0.5, -0.5, 0.5],
-        normal: [1.0, 0.0, 0.0],
-    },
-    CubeVertex {
-        position: [0.5, -0.5, -0.5],
-        normal: [1.0, 0.0, 0.0],
-    },
-    CubeVertex {
-        position: [0.5, 0.5, -0.5],
-        normal: [1.0, 0.0, 0.0],
-    },
-    CubeVertex {
-        position: [0.5, 0.5, 0.5],
-        normal: [1.0, 0.0, 0.0],
-    },
-    // -X face
-    CubeVertex {
-        position: [-0.5, -0.5, -0.5],
-        normal: [-1.0, 0.0, 0.0],
-    },
-    CubeVertex {
-        position: [-0.5, -0.5, 0.5],
-        normal: [-1.0, 0.0, 0.0],
-    },
-    CubeVertex {
-        position: [-0.5, 0.5, 0.5],
-        normal: [-1.0, 0.0, 0.0],
-    },
-    CubeVertex {
-        position: [-0.5, 0.5, -0.5],
-        normal: [-1.0, 0.0, 0.0],
-    },
-    // +Y face
-    CubeVertex {
-        position: [-0.5, 0.5, 0.5],
-        normal: [0.0, 1.0, 0.0],
-    },
-    CubeVertex {
-        position: [0.5, 0.5, 0.5],
-        normal: [0.0, 1.0, 0.0],
-    },
-    CubeVertex {
-        position: [0.5, 0.5, -0.5],
-        normal: [0.0, 1.0, 0.0],
-    },
-    CubeVertex {
-        position: [-0.5, 0.5, -0.5],
-        normal: [0.0, 1.0, 0.0],
-    },
-    // -Y face
-    CubeVertex {
-        position: [-0.5, -0.5, -0.5],
-        normal: [0.0, -1.0, 0.0],
-    },
-    CubeVertex {
-        position: [0.5, -0.5, -0.5],
-        normal: [0.0, -1.0, 0.0],
-    },
-    CubeVertex {
-        position: [0.5, -0.5, 0.5],
-        normal: [0.0, -1.0, 0.0],
-    },
-    CubeVertex {
-        position: [-0.5, -0.5, 0.5],
-        normal: [0.0, -1.0, 0.0],
-    },
-];
-
-const CUBE_INDICES: &[u16] = &[
-    0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 8, 9, 10, 8, 10, 11, 12, 13, 14, 12, 14, 15, 16, 17, 18,
-    16, 18, 19, 20, 21, 22, 20, 22, 23,
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DebugVisualMode {
@@ -255,22 +140,40 @@ pub(crate) struct OverlayStats {
 
 pub(crate) struct Renderer {
     terrain_pipeline: GraphicsPipeline,
-    raster_cube_pipeline: GraphicsPipeline,
+    raster_pipeline: GraphicsPipeline,
     upscale_pipeline: GraphicsPipeline,
     upscale_sampler: Sampler,
-    cube_mesh: CubeMesh,
+    raster_sampler: Sampler,
+    cube_model: RasterModelGpu,
+    raster_model: Option<RasterModelGpu>,
     render_target: Option<RenderTarget>,
     target_format: TextureFormat,
 }
 
 impl Renderer {
-    pub(crate) fn new(gpu: &Device, target_format: TextureFormat) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn new(
+        gpu: &Device,
+        target_format: TextureFormat,
+        config: &AppConfig,
+    ) -> Result<Self, Box<dyn Error>> {
+        let cube_model = RasterModelGpu::upload(gpu, &RasterModelCpu::cube())?;
+        let raster_model =
+            if config.raster_model_enabled && !config.raster_model_path.as_os_str().is_empty() {
+                let cpu_model = RasterModelCpu::load_obj(&config.raster_model_path)?;
+                let _model_bounds = (cpu_model.bounds_min, cpu_model.bounds_max);
+                Some(RasterModelGpu::upload(gpu, &cpu_model)?)
+            } else {
+                None
+            };
+
         Ok(Self {
             terrain_pipeline: create_terrain_pipeline(gpu, target_format)?,
-            raster_cube_pipeline: create_raster_cube_pipeline(gpu, target_format)?,
+            raster_pipeline: create_raster_pipeline(gpu, target_format)?,
             upscale_pipeline: create_upscale_pipeline(gpu, target_format)?,
             upscale_sampler: create_upscale_sampler(gpu)?,
-            cube_mesh: create_cube_mesh(gpu)?,
+            raster_sampler: create_raster_model_sampler(gpu)?,
+            cube_model,
+            raster_model,
             render_target: None,
             target_format,
         })
@@ -351,9 +254,37 @@ impl Renderer {
         render_pass.draw_primitives(3, 1, 0, 0);
         gpu.end_render_pass(render_pass);
 
-        if config.raster_cube_enabled {
-            let cube_params =
-                raster_cube_params(camera, render_target.width, render_target.height, config);
+        let raster_draw = if config.raster_model_enabled {
+            self.raster_model.as_ref().map(|model| {
+                let yaw = config.raster_model_yaw_degrees.to_radians();
+                (
+                    model,
+                    [
+                        config.raster_model_x,
+                        config.raster_model_y,
+                        config.raster_model_height,
+                        config.raster_model_scale,
+                    ],
+                    [yaw.cos(), yaw.sin(), 0.0, 0.0],
+                )
+            })
+        } else {
+            None
+        }
+        .or_else(|| {
+            config.raster_cube_enabled.then_some((
+                &self.cube_model,
+                [
+                    config.raster_cube_x,
+                    config.raster_cube_y,
+                    config.raster_cube_height,
+                    config.raster_cube_size,
+                ],
+                [1.0, 0.0, 0.0, 0.0],
+            ))
+        });
+
+        if let Some((model, model_transform, rotation)) = raster_draw {
             let color_targets = [
                 ColorTargetInfo::default()
                     .with_texture(&render_target.color_texture)
@@ -374,28 +305,56 @@ impl Renderer {
 
             let raster_pass =
                 gpu.begin_render_pass(&command_buffer, &color_targets, Some(&depth_target))?;
-            raster_pass.bind_graphics_pipeline(&self.raster_cube_pipeline);
-            raster_pass.bind_vertex_buffers(
-                0,
-                &[BufferBinding::new()
-                    .with_buffer(&self.cube_mesh.vertex_buffer)
-                    .with_offset(0)],
-            );
-            raster_pass.bind_index_buffer(
-                &BufferBinding::new()
-                    .with_buffer(&self.cube_mesh.index_buffer)
-                    .with_offset(0),
-                IndexElementSize::_16BIT,
-            );
-            raster_pass.bind_fragment_samplers(
-                0,
-                &[TextureSamplerBinding::new()
-                    .with_texture(&render_target.terrain_depth_texture)
-                    .with_sampler(&self.upscale_sampler)],
-            );
-            command_buffer.push_vertex_uniform_data(0, &cube_params);
-            command_buffer.push_fragment_uniform_data(0, &cube_params);
-            raster_pass.draw_indexed_primitives(self.cube_mesh.index_count, 1, 0, 0, 0);
+            raster_pass.bind_graphics_pipeline(&self.raster_pipeline);
+            for batch in &model.batches {
+                let material = model
+                    .materials
+                    .get(batch.material_index)
+                    .unwrap_or(&model.materials[0]);
+                let raster_params = raster_params(
+                    camera,
+                    render_target.width,
+                    render_target.height,
+                    model_transform,
+                    rotation,
+                    material.diffuse,
+                    material.specular,
+                    material.flags,
+                );
+
+                raster_pass.bind_vertex_buffers(
+                    0,
+                    &[BufferBinding::new()
+                        .with_buffer(&batch.vertex_buffer)
+                        .with_offset(0)],
+                );
+                raster_pass.bind_index_buffer(
+                    &BufferBinding::new()
+                        .with_buffer(&batch.index_buffer)
+                        .with_offset(0),
+                    IndexElementSize::_32BIT,
+                );
+                raster_pass.bind_fragment_samplers(
+                    0,
+                    &[
+                        TextureSamplerBinding::new()
+                            .with_texture(&render_target.terrain_depth_texture)
+                            .with_sampler(&self.upscale_sampler),
+                        TextureSamplerBinding::new()
+                            .with_texture(&material.diffuse_texture)
+                            .with_sampler(&self.raster_sampler),
+                        TextureSamplerBinding::new()
+                            .with_texture(&material.specular_texture)
+                            .with_sampler(&self.raster_sampler),
+                        TextureSamplerBinding::new()
+                            .with_texture(&material.normal_texture)
+                            .with_sampler(&self.raster_sampler),
+                    ],
+                );
+                command_buffer.push_vertex_uniform_data(0, &raster_params);
+                command_buffer.push_fragment_uniform_data(0, &raster_params);
+                raster_pass.draw_indexed_primitives(batch.index_count, 1, 0, 0, 0);
+            }
             gpu.end_render_pass(raster_pass);
         }
 
@@ -482,7 +441,7 @@ fn create_terrain_pipeline(
     Ok(pipeline)
 }
 
-fn create_raster_cube_pipeline(
+fn create_raster_pipeline(
     gpu: &Device,
     target_format: TextureFormat,
 ) -> Result<GraphicsPipeline, Box<dyn Error>> {
@@ -504,7 +463,7 @@ fn create_raster_cube_pipeline(
             include_bytes!(concat!(env!("OUT_DIR"), "/raster_cube.frag.spv")),
             ShaderStage::Fragment,
         )
-        .with_samplers(1)
+        .with_samplers(4)
         .with_uniform_buffers(1)
         .with_entrypoint(c"main")
         .build()?;
@@ -518,7 +477,7 @@ fn create_raster_cube_pipeline(
             VertexInputState::new()
                 .with_vertex_buffer_descriptions(&[VertexBufferDescription::new()
                     .with_slot(0)
-                    .with_pitch(size_of::<CubeVertex>() as u32)
+                    .with_pitch(size_of::<RasterVertex>() as u32)
                     .with_input_rate(VertexInputRate::Vertex)
                     .with_instance_step_rate(0)])
                 .with_vertex_attributes(&[
@@ -532,6 +491,16 @@ fn create_raster_cube_pipeline(
                         .with_location(1)
                         .with_buffer_slot(0)
                         .with_offset(size_of::<[f32; 3]>() as u32),
+                    VertexAttribute::new()
+                        .with_format(VertexElementFormat::Float2)
+                        .with_location(2)
+                        .with_buffer_slot(0)
+                        .with_offset(size_of::<[f32; 6]>() as u32),
+                    VertexAttribute::new()
+                        .with_format(VertexElementFormat::Float4)
+                        .with_location(3)
+                        .with_buffer_slot(0)
+                        .with_offset(size_of::<[f32; 8]>() as u32),
                 ]),
         )
         .with_rasterizer_state(
@@ -614,15 +583,19 @@ fn upscale_params(
     }
 }
 
-fn raster_cube_params(
+fn raster_params(
     camera: &Camera,
     width: u32,
     height: u32,
-    config: &AppConfig,
-) -> RasterCubeParams {
+    model: [f32; 4],
+    rotation: [f32; 4],
+    material_diffuse: [f32; 4],
+    material_specular: [f32; 4],
+    material_flags: [f32; 4],
+) -> RasterParams {
     let ray_basis = camera_ray_basis(camera, width, height);
 
-    RasterCubeParams {
+    RasterParams {
         camera: [camera.x, camera.y, camera.height, 0.0],
         render: [
             width as f32,
@@ -630,12 +603,11 @@ fn raster_cube_params(
             RAYMARCH_START_DISTANCE,
             camera.max_distance,
         ],
-        cube: [
-            config.raster_cube_x,
-            config.raster_cube_y,
-            config.raster_cube_height,
-            config.raster_cube_size,
-        ],
+        model,
+        rotation,
+        material_diffuse,
+        material_specular,
+        material_flags,
         ray_forward: [
             ray_basis.forward[0],
             ray_basis.forward[1],
@@ -745,77 +717,6 @@ fn create_upscale_sampler(gpu: &Device) -> Result<Sampler, Box<dyn Error>> {
             .with_address_mode_v(SamplerAddressMode::ClampToEdge)
             .with_address_mode_w(SamplerAddressMode::ClampToEdge),
     )?)
-}
-
-fn create_cube_mesh(gpu: &Device) -> Result<CubeMesh, Box<dyn Error>> {
-    let vertices_len_bytes = std::mem::size_of_val(CUBE_VERTICES);
-    let indices_len_bytes = std::mem::size_of_val(CUBE_INDICES);
-    let transfer_buffer = gpu
-        .create_transfer_buffer()
-        .with_size(vertices_len_bytes.max(indices_len_bytes) as u32)
-        .with_usage(TransferBufferUsage::UPLOAD)
-        .build()?;
-
-    let copy_commands = gpu.acquire_command_buffer()?;
-    let copy_pass = gpu.begin_copy_pass(&copy_commands)?;
-    let vertex_buffer = create_buffer_with_data(
-        gpu,
-        &transfer_buffer,
-        &copy_pass,
-        BufferUsageFlags::VERTEX,
-        CUBE_VERTICES,
-    )?;
-    let index_buffer = create_buffer_with_data(
-        gpu,
-        &transfer_buffer,
-        &copy_pass,
-        BufferUsageFlags::INDEX,
-        CUBE_INDICES,
-    )?;
-
-    gpu.end_copy_pass(copy_pass);
-    copy_commands.submit()?;
-
-    Ok(CubeMesh {
-        vertex_buffer,
-        index_buffer,
-        index_count: CUBE_INDICES.len() as u32,
-    })
-}
-
-fn create_buffer_with_data<T: Copy>(
-    gpu: &Device,
-    transfer_buffer: &TransferBuffer,
-    copy_pass: &CopyPass,
-    usage: BufferUsageFlags,
-    data: &[T],
-) -> Result<Buffer, Box<dyn Error>> {
-    let len_bytes = std::mem::size_of_val(data);
-    let buffer = gpu
-        .create_buffer()
-        .with_size(len_bytes as u32)
-        .with_usage(usage)
-        .build()?;
-
-    let mut map = transfer_buffer.map::<T>(gpu, true);
-    let mem = map.mem_mut();
-    for (index, &value) in data.iter().enumerate() {
-        mem[index] = value;
-    }
-    map.unmap();
-
-    copy_pass.upload_to_gpu_buffer(
-        TransferBufferLocation::new()
-            .with_offset(0)
-            .with_transfer_buffer(transfer_buffer),
-        BufferRegion::new()
-            .with_offset(0)
-            .with_size(len_bytes as u32)
-            .with_buffer(&buffer),
-        true,
-    );
-
-    Ok(buffer)
 }
 
 fn shader_params(
@@ -979,12 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn raster_cube_params_use_config_world_coordinates() {
-        let mut config = AppConfig::default();
-        config.raster_cube_x = 12.0;
-        config.raster_cube_y = 34.0;
-        config.raster_cube_height = 56.0;
-        config.raster_cube_size = 7.0;
+    fn raster_params_use_config_world_coordinates() {
         let camera = Camera {
             x: 1.0,
             y: 2.0,
@@ -995,13 +891,24 @@ mod tests {
             max_distance: 1000.0,
         };
 
-        let params = raster_cube_params(&camera, 800, 400, &config);
+        let params = raster_params(
+            &camera,
+            800,
+            400,
+            [12.0, 34.0, 56.0, 7.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.8, 0.7, 0.6, 28.0],
+            [0.1, 0.2, 0.3, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        );
 
         assert_eq!(params.camera, [1.0, 2.0, 3.0, 0.0]);
         assert_eq!(
             params.render,
             [800.0, 400.0, RAYMARCH_START_DISTANCE, 1000.0]
         );
-        assert_eq!(params.cube, [12.0, 34.0, 56.0, 7.0]);
+        assert_eq!(params.model, [12.0, 34.0, 56.0, 7.0]);
+        assert_eq!(params.rotation, [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(params.material_diffuse, [0.8, 0.7, 0.6, 28.0]);
     }
 }

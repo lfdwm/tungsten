@@ -8,3 +8,4 @@ license = "MIT OR Apache-2.0"
 image = { version = "0.25.9", default-features = false, features = ["png"] }
 png = "0.18.1"
 sdl3 = { version = "0.18.4", default-features = false, features = ["use-pkg-config"] }
+tobj = { version = "4.0.4", default-features = false }

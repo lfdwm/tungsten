@@ -6,6 +6,7 @@ This document describes the current terrain renderer in `tungsten`. The renderer
 - Runtime config parsing: `src/config.rs`
 - Camera, replay, and player movement: `src/camera.rs`
 - Render-pass orchestration: `src/renderer.rs`
+- OBJ/MTL raster asset loading: `src/raster_model.rs`
 - Terrain data, tile streaming, and collision height field: `src/terrain.rs`
 - Terrain fragment shader: `shaders/voxelspace.frag`
 - Raster cube shaders: `shaders/raster_cube.vert`, `shaders/raster_cube.frag`
@@ -28,18 +29,18 @@ flowchart TD
     TerrainShader --> LowResColor[Offscreen color target]
     TerrainShader --> TerrainDepth[Terrain-only linear depth target]
     TerrainShader --> SceneDepth[Scene linear depth target]
-    Config --> RasterCube[Raster cube pass]
-    TerrainDepth --> RasterCube
-    LowResColor --> RasterCube
-    SceneDepth --> RasterCube
-    RasterCube --> LowResColor
-    RasterCube --> SceneDepth
+    Config --> RasterModel[Raster model pass]
+    TerrainDepth --> RasterModel
+    LowResColor --> RasterModel
+    SceneDepth --> RasterModel
+    RasterModel --> LowResColor
+    RasterModel --> SceneDepth
     LowResColor --> Upscale[upscale.frag]
     SceneDepth --> Upscale
     Upscale --> Swapchain[Window swapchain]
 ```
 
-The app renders the terrain into offscreen color, terrain-only normalized linear depth, and scene normalized linear depth targets whose size is controlled by `performance_render_scale`. The optional raster cube pass runs before upscale, samples terrain depth for visibility, and writes cube color plus updated scene depth. The color result is then nearest-neighbor upscaled to the swapchain. The scene depth target is sampled by the upscale pass for the depth debug view and is available for later passes. The upscale pass also draws the FPS and frame-time overlay.
+The app renders the terrain into offscreen color, terrain-only normalized linear depth, and scene normalized linear depth targets whose size is controlled by `performance_render_scale`. The optional raster model pass runs before upscale, samples terrain depth for visibility, and writes raster color plus updated scene depth. The color result is then nearest-neighbor upscaled to the swapchain. The scene depth target is sampled by the upscale pass for the depth debug view and is available for later passes. The upscale pass also draws the FPS and frame-time overlay.
 
 ## Terrain Assets
 
@@ -322,11 +323,15 @@ The 2D backdrop uses the same lighting function. If a backdrop hit is before `no
 
 Fog mixes terrain color toward sky based on horizontal hit distance and `camera.max_distance`.
 
-## Raster Cube Pass
+## Raster Model Pass
 
-When `raster_cube_enabled` is true, `src/renderer.rs` draws a single static cube after terrain rendering and before the upscale pass. The cube vertex shader uses the same camera origin, ray basis, vertical FoV, near distance, and `camera.max_distance` depth normalization as the terrain shader.
+When `raster_model_enabled` is true and `raster_model_path` points at an OBJ file, startup loads the OBJ/MTL through `tobj`, decodes PNG material maps, uploads the model to SDL GPU buffers/textures, and draws it after terrain rendering and before the upscale pass. The raster vertex shader uses the same camera origin, ray basis, vertical FoV, near distance, and `camera.max_distance` depth normalization as the terrain shader.
 
-The raster pass uses a cube-only hardware depth target for cube self-occlusion. The fragment shader applies basic Phong shading and samples the terrain-only depth texture at the cube fragment's screen position. If the terrain depth is nearer than the cube depth, the cube fragment is discarded. Surviving cube fragments write over the offscreen color target and update the scene depth target. Later passes should sample scene depth when they want visibility for terrain plus raster geometry, and terrain depth when they specifically need terrain-only visibility.
+OBJ material support is intentionally narrow: diffuse maps use `map_Kd`, specular maps use `map_Ks`, and normal maps use `norm`/`bump`/`map_Bump` where exposed by the material. Texture images must be PNG. Missing maps use generated fallbacks, and models without UVs render without normal mapping.
+
+The raster pass uses a raster-only hardware depth target for model self-occlusion. The fragment shader applies basic Phong shading with diffuse/specular/normal material sampling and samples the terrain-only depth texture at the fragment's screen position. If the terrain depth is nearer than the raster depth, the fragment is discarded. Surviving fragments write over the offscreen color target and update the scene depth target. Later passes should sample scene depth when they want visibility for terrain plus raster geometry, and terrain depth when they specifically need terrain-only visibility.
+
+When `raster_cube_enabled` is true, the same raster path draws the built-in debug cube. If both a configured model and the debug cube are enabled, the configured model is drawn.
 
 ## Runtime Config
 
@@ -348,6 +353,13 @@ Missing keys use built-in defaults from `src/config.rs`.
 | `raster_cube_y` | `240.0` | `>= 0.0` | Test cube center Y coordinate in world units, mapped to shader Z. |
 | `raster_cube_height` | `120.0` | `>= 0.0` | Test cube center height in world units. |
 | `raster_cube_size` | `64.0` | `> 0.0` | Test cube edge length in world units. |
+| `raster_model_enabled` | `false` | `true` or `false` | Loads and draws a configured OBJ raster model at startup. |
+| `raster_model_path` | `""` | path or empty string | OBJ model path. Empty keeps model loading disabled and allows the cube debug path. |
+| `raster_model_x` | `320.0` | `>= 0.0` | Model origin X coordinate in world units. |
+| `raster_model_y` | `240.0` | `>= 0.0` | Model origin Y coordinate in world units, mapped to shader Z. |
+| `raster_model_height` | `120.0` | `>= 0.0` | Model origin height in world units. |
+| `raster_model_scale` | `1.0` | `> 0.0` | Uniform model scale in world units per OBJ unit. |
+| `raster_model_yaw_degrees` | `0.0` | finite number | Rotation around the world height axis. |
 | `near_dda_distance` | `512.0` | `> 0.0` | Horizontal distance covered by near detailed DDA before main raymarching. |
 | `near_dda_max_steps` | `1024` | `1..4096` | Maximum resident near-height cells the DDA may traverse before handing off to the main raymarch. |
 | `start_x` | `250.0` | `>= 0.0` | Initial camera/player X coordinate. |

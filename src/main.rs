@@ -1,5 +1,6 @@
 mod camera;
 mod config;
+mod raster_model;
 mod renderer;
 mod terrain;
 
@@ -149,7 +150,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
     let target_format = gpu.get_swapchain_texture_format(&window);
     let mut terrain_maps = terrain::load_terrain_maps(&gpu, &config)?;
-    let mut renderer = Renderer::new(&gpu, target_format)?;
+    let mut renderer = Renderer::new(&gpu, target_format, &config)?;
     let mouse = sdl.mouse();
     mouse.set_relative_mouse_mode(&window, true);
     mouse.show_cursor(false);

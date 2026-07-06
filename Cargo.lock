@@ -167,12 +167,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
+name = "tobj"
+version = "4.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da83817ac7401436633efc35c19edae9f326fa741fae775a1caa406de9db07c"
+
+[[package]]
 name = "tungsten"
 version = "0.1.0"
 dependencies = [
  "image",
  "png",
  "sdl3",
+ "tobj",
 ]
 
 [[package]]

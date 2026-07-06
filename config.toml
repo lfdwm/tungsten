@@ -14,6 +14,14 @@ raster_cube_y = 4315.0
 raster_cube_height = 230.0
 raster_cube_size = 96.0
 
+raster_model_enabled = false
+raster_model_path = ""
+raster_model_x = 320.0
+raster_model_y = 240.0
+raster_model_height = 120.0
+raster_model_scale = 1.0
+raster_model_yaw_degrees = 0.0
+
 # [ Platladan ]
 # present_mode = "vsync"
 # max_framerate = 200.0
