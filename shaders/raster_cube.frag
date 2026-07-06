@@ -26,8 +26,6 @@ layout(location = 3) in vec4 world_tangent;
 layout(location = 0) out vec4 out_color;
 layout(location = 1) out float out_scene_depth;
 
-const float DEPTH_EPSILON_WORLD = 0.5;
-
 vec3 camera_origin() {
     return vec3(camera.x, camera.z, camera.y);
 }
@@ -40,6 +38,9 @@ float normalized_linear_view_depth(vec3 point) {
     return clamp((view_depth - near_depth) / (far_depth - near_depth), 0.0, 1.0);
 }
 
+// This function returns depth values with a buffer (epsilon)
+// for minimizing flickering / z-fighting.
+const float DEPTH_EPSILON_WORLD = 0.1;
 float normalized_depth_epsilon() {
     float near_depth = render.z;
     float far_depth = max(render.w, near_depth + 0.0001);
