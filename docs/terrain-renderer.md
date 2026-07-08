@@ -448,7 +448,7 @@ The repo includes helper binaries for derived assets:
 | `build_worldmap` | Generate tiled worldmap packages from source height/color maps. |
 | `max_height_mip` | Generate conservative max-height R16 mips for far terrain. |
 | `upsample_heightmap` | Generate bilinear interpolated R16 height maps. |
-| `upsample_colormap` | Generate bilinear upsampled, ordered-dithered PNG color maps. |
+| `upsample_colormap` | Generate Bayer 4x4 dithered PNG color maps without color interpolation. |
 
 The far height map used by the renderer should be generated as a max-height mip, not an average mip, so distant peaks remain visible.
 

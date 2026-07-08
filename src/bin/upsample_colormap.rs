@@ -13,16 +13,7 @@ use png::{BitDepth, ColorType, Compression, Encoder};
 const PNG_STREAM_CHUNK_BYTES: usize = 1024 * 1024;
 const RGBA_CHANNELS: usize = 4;
 
-const BAYER_8X8: [[u8; 8]; 8] = [
-    [0, 48, 12, 60, 3, 51, 15, 63],
-    [32, 16, 44, 28, 35, 19, 47, 31],
-    [8, 56, 4, 52, 11, 59, 7, 55],
-    [40, 24, 36, 20, 43, 27, 39, 23],
-    [2, 50, 14, 62, 1, 49, 13, 61],
-    [34, 18, 46, 30, 33, 17, 45, 29],
-    [10, 58, 6, 54, 9, 57, 5, 53],
-    [42, 26, 38, 22, 41, 25, 37, 21],
-];
+const BAYER_4X4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
 #[derive(Debug, PartialEq, Eq)]
 struct Size {
@@ -48,7 +39,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     upsample_colormap(&args)?;
 
     println!(
-        "wrote {} as {}x{} dithered RGBA PNG upsample",
+        "wrote {} as {}x{} Bayer 4x4 dithered RGBA PNG upsample",
         args.output.display(),
         args.output_size.width,
         args.output_size.height
@@ -194,15 +185,17 @@ fn write_upsampled_png(
             let y_sample = sample_axis(input_size.height, output_size.height, out_y);
 
             for (out_x, x_sample) in x_samples.iter().enumerate() {
-                let color =
-                    sample_bilinear_rgba(input.as_raw(), input_size.width, *x_sample, y_sample);
                 let threshold = dither_threshold(out_x, out_y);
+                let color = sample_bayer_rgba(
+                    input.as_raw(),
+                    input_size.width,
+                    *x_sample,
+                    y_sample,
+                    threshold,
+                );
                 let output_index = out_x * RGBA_CHANNELS;
 
-                row[output_index] = quantize_dithered_channel(color[0], threshold);
-                row[output_index + 1] = quantize_dithered_channel(color[1], threshold);
-                row[output_index + 2] = quantize_dithered_channel(color[2], threshold);
-                row[output_index + 3] = quantize_channel(color[3]);
+                row[output_index..output_index + RGBA_CHANNELS].copy_from_slice(&color);
             }
 
             stream.write_all(&row)?;
@@ -241,56 +234,42 @@ fn sample_axis(input_len: usize, output_len: usize, out_index: usize) -> SampleA
     }
 }
 
-fn sample_bilinear_rgba(input: &[u8], width: usize, x: SampleAxis, y: SampleAxis) -> [f32; 4] {
-    [
-        sample_bilinear_channel(input, width, x, y, 0),
-        sample_bilinear_channel(input, width, x, y, 1),
-        sample_bilinear_channel(input, width, x, y, 2),
-        sample_bilinear_channel(input, width, x, y, 3),
-    ]
-}
-
-fn sample_bilinear_channel(
+fn sample_bayer_rgba(
     input: &[u8],
     width: usize,
     x: SampleAxis,
     y: SampleAxis,
-    channel: usize,
-) -> f32 {
-    let c00 = read_channel(input, width, x.lower, y.lower, channel) as f32;
-    let c10 = read_channel(input, width, x.upper, y.lower, channel) as f32;
-    let c01 = read_channel(input, width, x.lower, y.upper, channel) as f32;
-    let c11 = read_channel(input, width, x.upper, y.upper, channel) as f32;
+    threshold: f32,
+) -> [u8; 4] {
+    let top_left_weight = (1.0 - x.weight) * (1.0 - y.weight);
+    let top_right_weight = x.weight * (1.0 - y.weight);
+    let bottom_left_weight = (1.0 - x.weight) * y.weight;
 
-    let c0 = c00 + (c10 - c00) * x.weight;
-    let c1 = c01 + (c11 - c01) * x.weight;
-    c0 + (c1 - c0) * y.weight
+    let (source_x, source_y) = if threshold < top_left_weight {
+        (x.lower, y.lower)
+    } else if threshold < top_left_weight + top_right_weight {
+        (x.upper, y.lower)
+    } else if threshold < top_left_weight + top_right_weight + bottom_left_weight {
+        (x.lower, y.upper)
+    } else {
+        (x.upper, y.upper)
+    };
+
+    read_rgba(input, width, source_x, source_y)
 }
 
-fn read_channel(input: &[u8], width: usize, x: usize, y: usize, channel: usize) -> u8 {
-    let index = (y * width + x) * RGBA_CHANNELS + channel;
-    input[index]
+fn read_rgba(input: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
+    let index = (y * width + x) * RGBA_CHANNELS;
+    [
+        input[index],
+        input[index + 1],
+        input[index + 2],
+        input[index + 3],
+    ]
 }
 
 fn dither_threshold(x: usize, y: usize) -> f32 {
-    (BAYER_8X8[y & 7][x & 7] as f32 + 0.5) / 64.0
-}
-
-fn quantize_dithered_channel(value: f32, threshold: f32) -> u8 {
-    let value = value.clamp(0.0, u8::MAX as f32);
-    let base = value.floor();
-    let fraction = value - base;
-    let dithered = if fraction > threshold {
-        base + 1.0
-    } else {
-        base
-    };
-
-    dithered.clamp(0.0, u8::MAX as f32) as u8
-}
-
-fn quantize_channel(value: f32) -> u8 {
-    value.round().clamp(0.0, u8::MAX as f32) as u8
+    (BAYER_4X4[y & 3][x & 3] as f32 + 0.5) / 16.0
 }
 
 fn usage() -> &'static str {
@@ -334,36 +313,43 @@ mod tests {
     }
 
     #[test]
-    fn bilinear_samples_rgba_channels() {
+    fn bayer_selects_source_rgba_without_interpolation() {
         let input: [u8; 16] = [
             0, 10, 20, 255, 100, 110, 120, 255, 200, 210, 220, 255, 255, 250, 245, 255,
         ];
-        let color = sample_bilinear_rgba(
-            &input,
-            2,
-            SampleAxis {
-                lower: 0,
-                upper: 1,
-                weight: 0.5,
-            },
-            SampleAxis {
-                lower: 0,
-                upper: 1,
-                weight: 0.5,
-            },
-        );
+        let x = SampleAxis {
+            lower: 0,
+            upper: 1,
+            weight: 0.5,
+        };
+        let y = SampleAxis {
+            lower: 0,
+            upper: 1,
+            weight: 0.5,
+        };
 
-        assert!((color[0] - 138.75).abs() < 0.001);
-        assert!((color[1] - 145.0).abs() < 0.001);
-        assert!((color[2] - 151.25).abs() < 0.001);
-        assert_eq!(color[3], 255.0);
+        assert_eq!(sample_bayer_rgba(&input, 2, x, y, 0.10), [0, 10, 20, 255]);
+        assert_eq!(
+            sample_bayer_rgba(&input, 2, x, y, 0.30),
+            [100, 110, 120, 255]
+        );
+        assert_eq!(
+            sample_bayer_rgba(&input, 2, x, y, 0.55),
+            [200, 210, 220, 255]
+        );
+        assert_eq!(
+            sample_bayer_rgba(&input, 2, x, y, 0.80),
+            [255, 250, 245, 255]
+        );
     }
 
     #[test]
-    fn dithered_quantization_uses_threshold() {
-        assert_eq!(quantize_dithered_channel(12.25, 0.20), 13);
-        assert_eq!(quantize_dithered_channel(12.25, 0.30), 12);
-        assert_eq!(quantize_dithered_channel(255.0, 0.0), 255);
+    fn dither_threshold_uses_4x4_bayer_pattern() {
+        assert_eq!(dither_threshold(0, 0), 0.5 / 16.0);
+        assert_eq!(dither_threshold(1, 0), 8.5 / 16.0);
+        assert_eq!(dither_threshold(3, 3), 5.5 / 16.0);
+        assert_eq!(dither_threshold(4, 0), dither_threshold(0, 0));
+        assert_eq!(dither_threshold(0, 4), dither_threshold(0, 0));
     }
 
     #[test]
@@ -400,6 +386,7 @@ mod tests {
 
         assert_eq!(output.dimensions(), (3, 3));
         assert_eq!(output.get_pixel(0, 0).0, [0, 10, 20, 255]);
+        assert_eq!(output.get_pixel(1, 1).0, [100, 110, 120, 255]);
         assert_eq!(output.get_pixel(2, 2).0, [255, 250, 245, 255]);
     }
 }

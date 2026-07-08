@@ -100,7 +100,7 @@ cargo run --release --bin upsample_heightmap -- \
   --output-size 16384x16384
 ```
 
-Generate a dithered bilinear upsampled colormap:
+Generate a Bayer 4x4 dithered upsampled colormap:
 
 ```sh
 cargo run --release --bin upsample_colormap -- \
