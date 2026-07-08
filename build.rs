@@ -11,6 +11,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=shaders/voxelspace.frag");
     println!("cargo:rerun-if-changed=shaders/raster_cube.vert");
     println!("cargo:rerun-if-changed=shaders/raster_cube.frag");
+    println!("cargo:rerun-if-changed=shaders/water.vert");
+    println!("cargo:rerun-if-changed=shaders/water.frag");
     println!("cargo:rerun-if-changed=shaders/upscale.frag");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
@@ -30,6 +32,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         "shaders/raster_cube.frag",
         out_dir.join("raster_cube.frag.spv"),
     )?;
+    compile_shader("shaders/water.vert", out_dir.join("water.vert.spv"))?;
+    compile_shader("shaders/water.frag", out_dir.join("water.frag.spv"))?;
     compile_shader("shaders/upscale.frag", out_dir.join("upscale.frag.spv"))?;
 
     Ok(())

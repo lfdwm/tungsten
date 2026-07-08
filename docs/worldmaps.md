@@ -29,6 +29,15 @@ assets/worldmaps/<world-name>/
       ...
     far/
       overview_4096.rgba
+  water/                  # only when water inputs are provided
+    mesh/
+      tile_0000_0000.wmesh
+      tile_0001_0000.wmesh
+      ...
+    flow/
+      tile_0000_0000.rg8
+      tile_0001_0000.rg8
+      ...
 ```
 
 ## Manifest
@@ -58,9 +67,22 @@ color_near_path = "color/near"
 color_far_path = "color/far/overview_4096.rgba"
 color_far_width = 4096
 color_far_height = 4096
+
+water_source_width = 16384
+water_source_height = 16384
+water_tile_size_x = 1024
+water_tile_size_y = 1024
+water_mesh_format = "wmesh1"
+water_mesh_path = "water/mesh"
+water_flow_format = "rg8"
+water_flow_path = "water/flow"
+water_ocean_raw_height = 24965
+water_ocean_height = 203.939
 ```
 
 `horizontal_scale` converts source pixels to world-space X/Z units. `height_scale` converts normalized R16 samples to world-space height. These are world properties, not renderer config values.
+
+The `water_*` keys are optional and are omitted for terrain-only packages. Water source dimensions may differ from terrain source dimensions, but they must cover the same world extents and divide evenly by the terrain tile counts.
 
 ## Tile Format
 
@@ -75,6 +97,18 @@ stored:  1028x1028 pixels
 ```
 
 Padding is copied from neighboring source pixels. At world edges it is clamped to the nearest valid source pixel. The renderer samples inside this padded tile data to avoid visible seams and to keep normal/height samples stable near tile boundaries.
+
+Water mesh tiles use the custom `wmesh1` binary format:
+
+```text
+magic: "TWMESH1\0"
+u32 vertex_count
+u32 index_count
+vertices: position.xyz normal.xyz uv.xy as little-endian f32
+indices: little-endian u32
+```
+
+Water flow tiles are raw RG8 files copied from the source flowmap red/green channels. The renderer currently loads water mesh geometry and renders a generated map-wide ocean plane from `water_ocean_height`; flow data is packaged for later shading work.
 
 ## Far Maps
 
@@ -91,6 +125,8 @@ cargo run --release --bin build_worldmap -- \
   --height-input "assets/untracked/continent Height Output 16384.r16" \
   --height-size 16384x16384 \
   --color-input "assets/untracked/continent Material Output 16384_diffuse.png" \
+  --water-height-input "assets/untracked/continent_Height Output_16384_water.png" \
+  --water-flow-input "assets/untracked/continent Water Flowmap 16384.png" \
   --output assets/worldmaps/continent \
   --tile-size 1024 \
   --tile-padding 2 \
@@ -101,7 +137,7 @@ cargo run --release --bin build_worldmap -- \
   --name continent
 ```
 
-The tool loads the full source height and decoded source color map into memory, then writes generated outputs one tile or overview map at a time.
+The tool loads the full source height and decoded source color map into memory, then writes generated outputs one tile or overview map at a time. When water inputs are provided, it detects ocean height from non-zero border water pixels, excludes ocean-level water from mesh tiles, writes a full-map ocean height into the manifest, and emits skirted mesh tiles for non-ocean water.
 
 ## Runtime Config
 

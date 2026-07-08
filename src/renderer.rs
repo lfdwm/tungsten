@@ -19,6 +19,7 @@ use crate::{
     config::AppConfig,
     raster_model::{RasterModelCpu, RasterModelGpu, RasterVertex, create_raster_model_sampler},
     terrain::TerrainMaps,
+    water::WaterVertex,
 };
 
 const RAYMARCH_START_DISTANCE: f32 = 0.05;
@@ -61,6 +62,17 @@ struct RasterParams {
     material_diffuse: [f32; 4],
     material_specular: [f32; 4],
     material_flags: [f32; 4],
+    ray_forward: [f32; 4],
+    ray_right: [f32; 4],
+    ray_up: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WaterParams {
+    camera: [f32; 4],
+    render: [f32; 4],
+    water: [f32; 4],
     ray_forward: [f32; 4],
     ray_right: [f32; 4],
     ray_up: [f32; 4],
@@ -140,6 +152,7 @@ pub(crate) struct OverlayStats {
 
 pub(crate) struct Renderer {
     terrain_pipeline: GraphicsPipeline,
+    water_pipeline: GraphicsPipeline,
     raster_pipeline: GraphicsPipeline,
     upscale_pipeline: GraphicsPipeline,
     upscale_sampler: Sampler,
@@ -168,6 +181,7 @@ impl Renderer {
 
         Ok(Self {
             terrain_pipeline: create_terrain_pipeline(gpu, target_format)?,
+            water_pipeline: create_water_pipeline(gpu, target_format)?,
             raster_pipeline: create_raster_pipeline(gpu, target_format)?,
             upscale_pipeline: create_upscale_pipeline(gpu, target_format)?,
             upscale_sampler: create_upscale_sampler(gpu)?,
@@ -253,6 +267,71 @@ impl Renderer {
         command_buffer.push_fragment_uniform_data(0, &params);
         render_pass.draw_primitives(3, 1, 0, 0);
         gpu.end_render_pass(render_pass);
+
+        if let Some(water) = terrain_maps.water.as_ref() {
+            let color_targets = [
+                ColorTargetInfo::default()
+                    .with_texture(&render_target.color_texture)
+                    .with_load_op(LoadOp::LOAD)
+                    .with_store_op(StoreOp::STORE),
+                ColorTargetInfo::default()
+                    .with_texture(&render_target.scene_depth_texture)
+                    .with_load_op(LoadOp::LOAD)
+                    .with_store_op(StoreOp::STORE),
+            ];
+            let depth_target = DepthStencilTargetInfo::new()
+                .with_texture(&mut render_target.cube_depth_texture)
+                .with_cycle(true)
+                .with_clear_depth(1.0)
+                .with_load_op(LoadOp::CLEAR)
+                .with_store_op(StoreOp::STORE);
+            let water_params = water_params(camera, render_target.width, render_target.height);
+            let water_pass =
+                gpu.begin_render_pass(&command_buffer, &color_targets, Some(&depth_target))?;
+            water_pass.bind_graphics_pipeline(&self.water_pipeline);
+            water_pass.bind_fragment_samplers(
+                0,
+                &[TextureSamplerBinding::new()
+                    .with_texture(&render_target.terrain_depth_texture)
+                    .with_sampler(&self.upscale_sampler)],
+            );
+            command_buffer.push_vertex_uniform_data(0, &water_params);
+            command_buffer.push_fragment_uniform_data(0, &water_params);
+
+            water_pass.bind_vertex_buffers(
+                0,
+                &[BufferBinding::new()
+                    .with_buffer(&water.ocean.vertex_buffer)
+                    .with_offset(0)],
+            );
+            water_pass.bind_index_buffer(
+                &BufferBinding::new()
+                    .with_buffer(&water.ocean.index_buffer)
+                    .with_offset(0),
+                IndexElementSize::_32BIT,
+            );
+            water_pass.draw_indexed_primitives(water.ocean.index_count, 1, 0, 0, 0);
+
+            for tile in &water.tiles {
+                let Some(mesh) = tile.mesh.as_ref() else {
+                    continue;
+                };
+                water_pass.bind_vertex_buffers(
+                    0,
+                    &[BufferBinding::new()
+                        .with_buffer(&mesh.vertex_buffer)
+                        .with_offset(0)],
+                );
+                water_pass.bind_index_buffer(
+                    &BufferBinding::new()
+                        .with_buffer(&mesh.index_buffer)
+                        .with_offset(0),
+                    IndexElementSize::_32BIT,
+                );
+                water_pass.draw_indexed_primitives(mesh.index_count, 1, 0, 0, 0);
+            }
+            gpu.end_render_pass(water_pass);
+        }
 
         let raster_draw = if config.raster_model_enabled {
             self.raster_model.as_ref().map(|model| {
@@ -441,6 +520,89 @@ fn create_terrain_pipeline(
     Ok(pipeline)
 }
 
+fn create_water_pipeline(
+    gpu: &Device,
+    target_format: TextureFormat,
+) -> Result<GraphicsPipeline, Box<dyn Error>> {
+    let vertex_shader = gpu
+        .create_shader()
+        .with_code(
+            ShaderFormat::SPIRV,
+            include_bytes!(concat!(env!("OUT_DIR"), "/water.vert.spv")),
+            ShaderStage::Vertex,
+        )
+        .with_uniform_buffers(1)
+        .with_entrypoint(c"main")
+        .build()?;
+
+    let fragment_shader = gpu
+        .create_shader()
+        .with_code(
+            ShaderFormat::SPIRV,
+            include_bytes!(concat!(env!("OUT_DIR"), "/water.frag.spv")),
+            ShaderStage::Fragment,
+        )
+        .with_samplers(1)
+        .with_uniform_buffers(1)
+        .with_entrypoint(c"main")
+        .build()?;
+
+    let pipeline = gpu
+        .create_graphics_pipeline()
+        .with_fragment_shader(&fragment_shader)
+        .with_vertex_shader(&vertex_shader)
+        .with_primitive_type(PrimitiveType::TriangleList)
+        .with_vertex_input_state(
+            VertexInputState::new()
+                .with_vertex_buffer_descriptions(&[VertexBufferDescription::new()
+                    .with_slot(0)
+                    .with_pitch(size_of::<WaterVertex>() as u32)
+                    .with_input_rate(VertexInputRate::Vertex)
+                    .with_instance_step_rate(0)])
+                .with_vertex_attributes(&[
+                    VertexAttribute::new()
+                        .with_format(VertexElementFormat::Float3)
+                        .with_location(0)
+                        .with_buffer_slot(0)
+                        .with_offset(0),
+                    VertexAttribute::new()
+                        .with_format(VertexElementFormat::Float3)
+                        .with_location(1)
+                        .with_buffer_slot(0)
+                        .with_offset(size_of::<[f32; 3]>() as u32),
+                    VertexAttribute::new()
+                        .with_format(VertexElementFormat::Float2)
+                        .with_location(2)
+                        .with_buffer_slot(0)
+                        .with_offset(size_of::<[f32; 6]>() as u32),
+                ]),
+        )
+        .with_rasterizer_state(
+            RasterizerState::new()
+                .with_fill_mode(FillMode::Fill)
+                .with_cull_mode(CullMode::None)
+                .with_enable_depth_clip(true),
+        )
+        .with_depth_stencil_state(
+            DepthStencilState::new()
+                .with_enable_depth_test(true)
+                .with_enable_depth_write(true)
+                .with_compare_op(CompareOp::Less),
+        )
+        .with_target_info(
+            GraphicsPipelineTargetInfo::new()
+                .with_color_target_descriptions(&[
+                    ColorTargetDescription::new().with_format(target_format),
+                    ColorTargetDescription::new().with_format(DEPTH_TARGET_FORMAT),
+                ])
+                .with_has_depth_stencil_target(true)
+                .with_depth_stencil_format(CUBE_DEPTH_TARGET_FORMAT),
+        )
+        .build()?;
+
+    Ok(pipeline)
+}
+
 fn create_raster_pipeline(
     gpu: &Device,
     target_format: TextureFormat,
@@ -608,6 +770,39 @@ fn raster_params(
         material_diffuse,
         material_specular,
         material_flags,
+        ray_forward: [
+            ray_basis.forward[0],
+            ray_basis.forward[1],
+            ray_basis.forward[2],
+            0.0,
+        ],
+        ray_right: [
+            ray_basis.right_scaled[0],
+            ray_basis.right_scaled[1],
+            ray_basis.right_scaled[2],
+            0.0,
+        ],
+        ray_up: [
+            ray_basis.up_scaled[0],
+            ray_basis.up_scaled[1],
+            ray_basis.up_scaled[2],
+            0.0,
+        ],
+    }
+}
+
+fn water_params(camera: &Camera, width: u32, height: u32) -> WaterParams {
+    let ray_basis = camera_ray_basis(camera, width, height);
+
+    WaterParams {
+        camera: [camera.x, camera.y, camera.height, 0.0],
+        render: [
+            width as f32,
+            height as f32,
+            RAYMARCH_START_DISTANCE,
+            camera.max_distance,
+        ],
+        water: [0.04, 0.30, 0.38, 0.0],
         ray_forward: [
             ray_basis.forward[0],
             ray_basis.forward[1],

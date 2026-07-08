@@ -1,7 +1,7 @@
 # Runtime terrain rendering knobs.
 #worldmap = "assets/worldmaps/continent/manifest.toml"
 #worldmap = "assets/worldmaps/continent_32k/manifest.toml"
-worldmap = "assets/worldmaps/continent_dithered/manifest.toml"
+worldmap = "assets/worldmaps/continent_water/manifest.toml"
 
 render_debug_visuals = true
 

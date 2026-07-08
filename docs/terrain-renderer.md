@@ -29,6 +29,11 @@ flowchart TD
     TerrainShader --> LowResColor[Offscreen color target]
     TerrainShader --> TerrainDepth[Terrain-only linear depth target]
     TerrainShader --> SceneDepth[Scene linear depth target]
+    TerrainDepth --> Water[Water raster pass]
+    LowResColor --> Water
+    SceneDepth --> Water
+    Water --> LowResColor
+    Water --> SceneDepth
     Config --> RasterModel[Raster model pass]
     TerrainDepth --> RasterModel
     LowResColor --> RasterModel
@@ -40,7 +45,7 @@ flowchart TD
     Upscale --> Swapchain[Window swapchain]
 ```
 
-The app renders the terrain into offscreen color, terrain-only normalized linear depth, and scene normalized linear depth targets whose size is controlled by `performance_render_scale`. The optional raster model pass runs before upscale, samples terrain depth for visibility, and writes raster color plus updated scene depth. The color result is then nearest-neighbor upscaled to the swapchain. The scene depth target is sampled by the upscale pass for the depth debug view and is available for later passes. The upscale pass also draws the FPS and frame-time overlay.
+The app renders the terrain into offscreen color, terrain-only normalized linear depth, and scene normalized linear depth targets whose size is controlled by `performance_render_scale`. If the worldmap has water data, the water pass draws a map-wide ocean plane and streamed non-ocean water mesh tiles against terrain depth, writing updated color and scene depth. The optional raster model pass then runs before upscale, samples terrain depth for visibility, and writes raster color plus updated scene depth. The color result is then nearest-neighbor upscaled to the swapchain. The scene depth target is sampled by the upscale pass for the depth debug view and is available for later passes. The upscale pass also draws the FPS and frame-time overlay.
 
 ## Terrain Assets
 
@@ -58,8 +63,12 @@ The package format is documented in [worldmaps.md](worldmaps.md). Runtime terrai
 | Near color tiles | Padded raw RGBA8 tiles | `1028x1028` stored pixels per tile | Detailed color when the tile is resident |
 | Far height map | Max-height raw R16 | `2048x2048` | Conservative far terrain LOD and backdrop |
 | Far color overview | Downsampled raw RGBA8 | `4096x4096` | Color fallback for far or unloaded near terrain |
+| Water mesh tiles | Custom `wmesh1` | Per worldmap | Non-ocean water geometry, including skirts |
+| Water flow tiles | Raw RG8 | Per worldmap | Packaged flow vectors for later water shading |
 
 With `tile_cache_radius = 1`, the runtime keeps a `3x3` resident cache of near tiles. The default `1024` payload tiles are stored in `3072x3072` near height and near color atlas textures. Generated tile padding is still used while extracting payloads and for CPU collision data. After startup, moving across a tile boundary uploads the newly visible row or column into ring atlas slots while shared tiles stay resident.
+
+Water mesh tiles are loaded for the same resident tile window. Ocean water is not stored as mesh; the renderer creates a full-map ocean plane from the manifest ocean height and relies on terrain-depth rejection to hide it under land.
 
 The world width/depth and maximum height come from the manifest:
 
@@ -323,6 +332,12 @@ The 2D backdrop uses the same lighting function. If a backdrop hit is before `no
 
 Fog mixes terrain color toward sky based on horizontal hit distance and `camera.max_distance`.
 
+## Water Pass
+
+When the selected worldmap contains water metadata, startup creates an ocean plane spanning the full terrain bounds at the manifest ocean height. Moving across terrain tile boundaries loads matching `wmesh1` non-ocean water tiles. The water pass runs after terrain and before the OBJ/cube raster pass, samples terrain-only depth, discards water behind terrain, and writes water color plus updated scene depth.
+
+Generated mesh tiles include vertical skirts on exposed water boundaries to hide gaps against terrain. Flow RG8 tiles are generated with the worldmap but are not used by the current simple water shader.
+
 ## Raster Model Pass
 
 When `raster_model_enabled` is true and `raster_model_path` points at an OBJ file, startup loads the OBJ/MTL through `tobj`, decodes PNG material maps, uploads the model to SDL GPU buffers/textures, and draws it after terrain rendering and before the upscale pass. The raster vertex shader uses the same camera origin, ray basis, vertical FoV, near distance, and `camera.max_distance` depth normalization as the terrain shader.
@@ -445,7 +460,7 @@ The repo includes helper binaries for derived assets:
 
 | Tool | Purpose |
 | --- | --- |
-| `build_worldmap` | Generate tiled worldmap packages from source height/color maps. |
+| `build_worldmap` | Generate tiled worldmap packages from source height/color maps and optional water maps. |
 | `max_height_mip` | Generate conservative max-height R16 mips for far terrain. |
 | `upsample_heightmap` | Generate bilinear interpolated R16 height maps. |
 | `upsample_colormap` | Generate Bayer 4x4 dithered PNG color maps without color interpolation. |

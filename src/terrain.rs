@@ -11,7 +11,7 @@ use sdl3::gpu::{
 };
 use tungsten::worldmap::{WorldmapManifest, manifest_dir};
 
-use crate::config::AppConfig;
+use crate::{config::AppConfig, water::WaterMaps};
 
 const MAX_SHADER_TILE_SLOTS: usize = 25;
 const R16_BYTES_PER_PIXEL: usize = 2;
@@ -38,6 +38,7 @@ pub(crate) struct TerrainMaps {
     pub(crate) height_scale: f32,
     pub(crate) manifest: WorldmapManifest,
     pub(crate) worldmap_dir: PathBuf,
+    pub(crate) water: Option<WaterMaps>,
     tile_cache: TerrainTileCache,
 }
 
@@ -75,6 +76,15 @@ impl TerrainMaps {
                 .invalidate_tiles_outside(window_min, window_max);
             self.current_window_min = window_min;
             self.current_window_max = window_max;
+            if let Some(water) = self.water.as_mut() {
+                water.update_tile_cache(
+                    gpu,
+                    &self.manifest,
+                    &self.worldmap_dir,
+                    window_min,
+                    window_max,
+                )?;
+            }
         }
 
         let missing_tiles =
@@ -431,6 +441,7 @@ pub(crate) fn load_terrain_maps(
     let tile_cache = TerrainTileCache {
         collision_height: HeightField::new(&manifest, tile_cache_width)?,
     };
+    let water = WaterMaps::load(gpu, &manifest)?;
 
     let mut terrain_maps = TerrainMaps {
         color_near,
@@ -453,6 +464,7 @@ pub(crate) fn load_terrain_maps(
         height_scale: manifest.height_scale,
         manifest,
         worldmap_dir,
+        water,
         tile_cache,
     };
 
@@ -700,6 +712,7 @@ mod tests {
             color_far_path: "color/far/overview_1.rgba".to_owned(),
             color_far_width: 1,
             color_far_height: 1,
+            water: None,
         };
         let bytes = [
             0_u16.to_le_bytes(),

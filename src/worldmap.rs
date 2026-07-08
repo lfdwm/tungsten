@@ -6,9 +6,27 @@ use std::{
 
 pub const HEIGHT_FORMAT_R16LE: &str = "r16le";
 pub const COLOR_FORMAT_RGBA8: &str = "rgba8";
+pub const WATER_MESH_FORMAT_WMESH1: &str = "wmesh1";
+pub const WATER_FLOW_FORMAT_RG8: &str = "rg8";
 pub const MANIFEST_FILE_NAME: &str = "manifest.toml";
 pub const HEIGHT_NEAR_DIR: &str = "height/near";
 pub const COLOR_NEAR_DIR: &str = "color/near";
+pub const WATER_MESH_DIR: &str = "water/mesh";
+pub const WATER_FLOW_DIR: &str = "water/flow";
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WaterManifest {
+    pub source_width: u32,
+    pub source_height: u32,
+    pub tile_size_x: u32,
+    pub tile_size_y: u32,
+    pub mesh_format: String,
+    pub mesh_path: String,
+    pub flow_format: String,
+    pub flow_path: String,
+    pub ocean_raw_height: u32,
+    pub ocean_height: f32,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorldmapManifest {
@@ -31,6 +49,7 @@ pub struct WorldmapManifest {
     pub color_far_path: String,
     pub color_far_width: u32,
     pub color_far_height: u32,
+    pub water: Option<WaterManifest>,
 }
 
 impl WorldmapManifest {
@@ -136,6 +155,39 @@ impl WorldmapManifest {
                 "color_far_height" => {
                     builder.color_far_height = Some(parse_manifest_u32(key, value, line_number)?)
                 }
+                "water_source_width" => {
+                    builder.water_source_width = Some(parse_manifest_u32(key, value, line_number)?)
+                }
+                "water_source_height" => {
+                    builder.water_source_height = Some(parse_manifest_u32(key, value, line_number)?)
+                }
+                "water_tile_size_x" => {
+                    builder.water_tile_size_x = Some(parse_manifest_u32(key, value, line_number)?)
+                }
+                "water_tile_size_y" => {
+                    builder.water_tile_size_y = Some(parse_manifest_u32(key, value, line_number)?)
+                }
+                "water_mesh_format" => {
+                    builder.water_mesh_format =
+                        Some(parse_manifest_string(key, value, line_number)?)
+                }
+                "water_mesh_path" => {
+                    builder.water_mesh_path = Some(parse_manifest_string(key, value, line_number)?)
+                }
+                "water_flow_format" => {
+                    builder.water_flow_format =
+                        Some(parse_manifest_string(key, value, line_number)?)
+                }
+                "water_flow_path" => {
+                    builder.water_flow_path = Some(parse_manifest_string(key, value, line_number)?)
+                }
+                "water_ocean_raw_height" => {
+                    builder.water_ocean_raw_height =
+                        Some(parse_manifest_u32(key, value, line_number)?)
+                }
+                "water_ocean_height" => {
+                    builder.water_ocean_height = Some(parse_manifest_f32(key, value, line_number)?)
+                }
                 _ => return Err(format!("line {line_number}: unknown manifest key `{key}`")),
             }
         }
@@ -154,7 +206,7 @@ impl WorldmapManifest {
     }
 
     pub fn to_toml(&self) -> String {
-        format!(
+        let mut toml = format!(
             concat!(
                 "name = \"{}\"\n",
                 "source_width = {}\n",
@@ -198,7 +250,37 @@ impl WorldmapManifest {
             escape_toml_string(&self.color_far_path),
             self.color_far_width,
             self.color_far_height,
-        )
+        );
+
+        if let Some(water) = &self.water {
+            toml.push_str(&format!(
+                concat!(
+                    "\n",
+                    "water_source_width = {}\n",
+                    "water_source_height = {}\n",
+                    "water_tile_size_x = {}\n",
+                    "water_tile_size_y = {}\n",
+                    "water_mesh_format = \"{}\"\n",
+                    "water_mesh_path = \"{}\"\n",
+                    "water_flow_format = \"{}\"\n",
+                    "water_flow_path = \"{}\"\n",
+                    "water_ocean_raw_height = {}\n",
+                    "water_ocean_height = {}\n"
+                ),
+                water.source_width,
+                water.source_height,
+                water.tile_size_x,
+                water.tile_size_y,
+                escape_toml_string(&water.mesh_format),
+                escape_toml_string(&water.mesh_path),
+                escape_toml_string(&water.flow_format),
+                escape_toml_string(&water.flow_path),
+                water.ocean_raw_height,
+                format_f32(water.ocean_height),
+            ));
+        }
+
+        toml
     }
 
     pub fn validate(self) -> Result<Self, String> {
@@ -256,6 +338,49 @@ impl WorldmapManifest {
 
         self.stored_tile_size()?;
         self.near_tile_count()?;
+        if let Some(water) = &self.water {
+            validate_nonzero(water.source_width, "water_source_width")?;
+            validate_nonzero(water.source_height, "water_source_height")?;
+            validate_nonzero(water.tile_size_x, "water_tile_size_x")?;
+            validate_nonzero(water.tile_size_y, "water_tile_size_y")?;
+
+            if water.mesh_format != WATER_MESH_FORMAT_WMESH1 {
+                return Err(format!(
+                    "`water_mesh_format` must be `{WATER_MESH_FORMAT_WMESH1}`, got `{}`",
+                    water.mesh_format
+                ));
+            }
+            if water.flow_format != WATER_FLOW_FORMAT_RG8 {
+                return Err(format!(
+                    "`water_flow_format` must be `{WATER_FLOW_FORMAT_RG8}`, got `{}`",
+                    water.flow_format
+                ));
+            }
+            if water.mesh_path.is_empty() || water.flow_path.is_empty() {
+                return Err("water manifest paths must not be empty".to_owned());
+            }
+            if water.ocean_raw_height > u16::MAX as u32 {
+                return Err("`water_ocean_raw_height` must fit in u16".to_owned());
+            }
+            if water.ocean_height < 0.0 || !water.ocean_height.is_finite() {
+                return Err("`water_ocean_height` must be finite and non-negative".to_owned());
+            }
+            if water.source_width % self.tile_count_x != 0
+                || water.source_height % self.tile_count_y != 0
+            {
+                return Err(
+                    "water dimensions must be evenly divisible by terrain tile counts".to_owned(),
+                );
+            }
+            if water.source_width / self.tile_count_x != water.tile_size_x
+                || water.source_height / self.tile_count_y != water.tile_size_y
+            {
+                return Err(
+                    "water tile sizes must match water dimensions divided by terrain tile counts"
+                        .to_owned(),
+                );
+            }
+        }
 
         Ok(self)
     }
@@ -319,6 +444,38 @@ impl WorldmapManifest {
         self.color_near_dir(worldmap_dir)
             .join(color_tile_file_name(tile_x, tile_y))
     }
+
+    pub fn water_mesh_dir(&self, worldmap_dir: impl AsRef<Path>) -> Option<PathBuf> {
+        self.water
+            .as_ref()
+            .map(|water| worldmap_dir.as_ref().join(&water.mesh_path))
+    }
+
+    pub fn water_flow_dir(&self, worldmap_dir: impl AsRef<Path>) -> Option<PathBuf> {
+        self.water
+            .as_ref()
+            .map(|water| worldmap_dir.as_ref().join(&water.flow_path))
+    }
+
+    pub fn water_mesh_tile_path(
+        &self,
+        worldmap_dir: impl AsRef<Path>,
+        tile_x: u32,
+        tile_y: u32,
+    ) -> Option<PathBuf> {
+        self.water_mesh_dir(worldmap_dir)
+            .map(|dir| dir.join(water_mesh_tile_file_name(tile_x, tile_y)))
+    }
+
+    pub fn water_flow_tile_path(
+        &self,
+        worldmap_dir: impl AsRef<Path>,
+        tile_x: u32,
+        tile_y: u32,
+    ) -> Option<PathBuf> {
+        self.water_flow_dir(worldmap_dir)
+            .map(|dir| dir.join(water_flow_tile_file_name(tile_x, tile_y)))
+    }
 }
 
 #[derive(Default)]
@@ -342,10 +499,52 @@ struct ManifestBuilder {
     color_far_path: Option<String>,
     color_far_width: Option<u32>,
     color_far_height: Option<u32>,
+    water_source_width: Option<u32>,
+    water_source_height: Option<u32>,
+    water_tile_size_x: Option<u32>,
+    water_tile_size_y: Option<u32>,
+    water_mesh_format: Option<String>,
+    water_mesh_path: Option<String>,
+    water_flow_format: Option<String>,
+    water_flow_path: Option<String>,
+    water_ocean_raw_height: Option<u32>,
+    water_ocean_height: Option<f32>,
 }
 
 impl ManifestBuilder {
     fn build(self) -> Result<WorldmapManifest, String> {
+        let water_keys_present = [
+            self.water_source_width.is_some(),
+            self.water_source_height.is_some(),
+            self.water_tile_size_x.is_some(),
+            self.water_tile_size_y.is_some(),
+            self.water_mesh_format.is_some(),
+            self.water_mesh_path.is_some(),
+            self.water_flow_format.is_some(),
+            self.water_flow_path.is_some(),
+            self.water_ocean_raw_height.is_some(),
+            self.water_ocean_height.is_some(),
+        ];
+        let water = if water_keys_present.iter().any(|present| *present) {
+            if !water_keys_present.iter().all(|present| *present) {
+                return Err("water manifest keys must be all present or all omitted".to_owned());
+            }
+            Some(WaterManifest {
+                source_width: required(self.water_source_width, "water_source_width")?,
+                source_height: required(self.water_source_height, "water_source_height")?,
+                tile_size_x: required(self.water_tile_size_x, "water_tile_size_x")?,
+                tile_size_y: required(self.water_tile_size_y, "water_tile_size_y")?,
+                mesh_format: required(self.water_mesh_format, "water_mesh_format")?,
+                mesh_path: required(self.water_mesh_path, "water_mesh_path")?,
+                flow_format: required(self.water_flow_format, "water_flow_format")?,
+                flow_path: required(self.water_flow_path, "water_flow_path")?,
+                ocean_raw_height: required(self.water_ocean_raw_height, "water_ocean_raw_height")?,
+                ocean_height: required(self.water_ocean_height, "water_ocean_height")?,
+            })
+        } else {
+            None
+        };
+
         WorldmapManifest {
             name: required(self.name, "name")?,
             source_width: required(self.source_width, "source_width")?,
@@ -366,6 +565,7 @@ impl ManifestBuilder {
             color_far_path: required(self.color_far_path, "color_far_path")?,
             color_far_width: required(self.color_far_width, "color_far_width")?,
             color_far_height: required(self.color_far_height, "color_far_height")?,
+            water,
         }
         .validate()
     }
@@ -385,6 +585,14 @@ pub fn height_tile_file_name(tile_x: u32, tile_y: u32) -> String {
 
 pub fn color_tile_file_name(tile_x: u32, tile_y: u32) -> String {
     format!("tile_{tile_x:04}_{tile_y:04}.rgba")
+}
+
+pub fn water_mesh_tile_file_name(tile_x: u32, tile_y: u32) -> String {
+    format!("tile_{tile_x:04}_{tile_y:04}.wmesh")
+}
+
+pub fn water_flow_tile_file_name(tile_x: u32, tile_y: u32) -> String {
+    format!("tile_{tile_x:04}_{tile_y:04}.rg8")
 }
 
 fn required<T>(value: Option<T>, key: &'static str) -> Result<T, String> {
@@ -476,6 +684,7 @@ mod tests {
             color_far_path: "color/far/overview_4096.rgba".to_owned(),
             color_far_width: 4096,
             color_far_height: 4096,
+            water: None,
         }
     }
 
@@ -503,5 +712,44 @@ mod tests {
     fn rejects_unknown_key() {
         let error = WorldmapManifest::parse("name = \"x\"\nwat = 1\n").unwrap_err();
         assert!(error.contains("unknown manifest key"));
+    }
+
+    #[test]
+    fn round_trips_water_manifest_toml() {
+        let mut manifest = sample_manifest();
+        manifest.water = Some(WaterManifest {
+            source_width: 2048,
+            source_height: 2048,
+            tile_size_x: 512,
+            tile_size_y: 512,
+            mesh_format: WATER_MESH_FORMAT_WMESH1.to_owned(),
+            mesh_path: WATER_MESH_DIR.to_owned(),
+            flow_format: WATER_FLOW_FORMAT_RG8.to_owned(),
+            flow_path: WATER_FLOW_DIR.to_owned(),
+            ocean_raw_height: 24965,
+            ocean_height: 203.939,
+        });
+
+        let parsed = WorldmapManifest::parse(&manifest.to_toml()).unwrap();
+
+        assert_eq!(parsed, manifest);
+        assert_eq!(
+            parsed.water_mesh_tile_path("world", 1, 2).unwrap(),
+            PathBuf::from("world/water/mesh/tile_0001_0002.wmesh")
+        );
+        assert_eq!(
+            parsed.water_flow_tile_path("world", 1, 2).unwrap(),
+            PathBuf::from("world/water/flow/tile_0001_0002.rg8")
+        );
+    }
+
+    #[test]
+    fn rejects_partial_water_manifest() {
+        let mut toml = sample_manifest().to_toml();
+        toml.push_str("\nwater_source_width = 2048\n");
+
+        let error = WorldmapManifest::parse(&toml).unwrap_err();
+
+        assert!(error.contains("all present or all omitted"));
     }
 }

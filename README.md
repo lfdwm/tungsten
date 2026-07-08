@@ -70,6 +70,8 @@ cargo run --release --bin build_worldmap -- \
   --height-input "assets/untracked/continent Height Output 16384.r16" \
   --height-size 16384x16384 \
   --color-input "assets/untracked/continent Material Output 16384_diffuse.png" \
+  --water-height-input "assets/untracked/continent_Height Output_16384_water.png" \
+  --water-flow-input "assets/untracked/continent Water Flowmap 16384.png" \
   --output assets/worldmaps/continent \
   --tile-size 1024 \
   --tile-padding 2 \

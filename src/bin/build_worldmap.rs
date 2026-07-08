@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env,
     error::Error,
     ffi::OsString,
@@ -8,15 +9,23 @@ use std::{
 
 use tungsten::worldmap::{
     COLOR_FORMAT_RGBA8, COLOR_NEAR_DIR, HEIGHT_FORMAT_R16LE, HEIGHT_NEAR_DIR, MANIFEST_FILE_NAME,
-    WorldmapManifest, color_tile_file_name, height_tile_file_name,
+    WATER_FLOW_DIR, WATER_FLOW_FORMAT_RG8, WATER_MESH_DIR, WATER_MESH_FORMAT_WMESH1, WaterManifest,
+    WorldmapManifest, color_tile_file_name, height_tile_file_name, water_flow_tile_file_name,
+    water_mesh_tile_file_name,
 };
 
 const R16_BYTES_PER_PIXEL: usize = 2;
 const RGBA_BYTES_PER_PIXEL: usize = 4;
+const RGB_BYTES_PER_PIXEL: usize = 3;
+const RG_BYTES_PER_PIXEL: usize = 2;
 const DEFAULT_TILE_SIZE: usize = 1024;
 const DEFAULT_TILE_PADDING: usize = 2;
 const DEFAULT_HORIZONTAL_SCALE: f32 = 0.5;
 const DEFAULT_HEIGHT_SCALE: f32 = 255.0 * 2.1;
+const OCEAN_HEIGHT_TOLERANCE_WORLD: f32 = 0.1;
+const WATER_SKIRT_DROP: f32 = 8.0;
+const WATER_SKIRT_TERRAIN_CLEARANCE: f32 = 2.0;
+const WATER_MESH_MAGIC: &[u8; 8] = b"TWMESH1\0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Size {
@@ -29,6 +38,8 @@ struct Args {
     height_input: PathBuf,
     height_size: Size,
     color_input: PathBuf,
+    water_height_input: Option<PathBuf>,
+    water_flow_input: Option<PathBuf>,
     output: PathBuf,
     tile_size: usize,
     tile_padding: usize,
@@ -60,6 +71,8 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Args, Box<dyn 
     let mut height_input = None;
     let mut height_size = None;
     let mut color_input = None;
+    let mut water_height_input = None;
+    let mut water_flow_input = None;
     let mut output = None;
     let mut tile_size = None;
     let mut tile_padding = None;
@@ -80,6 +93,15 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Args, Box<dyn 
             }
             Some("--color-input") => {
                 color_input = Some(PathBuf::from(next_value(&mut args, "--color-input")?))
+            }
+            Some("--water-height-input") => {
+                water_height_input = Some(PathBuf::from(next_value(
+                    &mut args,
+                    "--water-height-input",
+                )?))
+            }
+            Some("--water-flow-input") => {
+                water_flow_input = Some(PathBuf::from(next_value(&mut args, "--water-flow-input")?))
             }
             Some("--output") => output = Some(PathBuf::from(next_value(&mut args, "--output")?)),
             Some("--tile-size") => {
@@ -115,6 +137,8 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Args, Box<dyn 
         height_input: height_input.ok_or("--height-input is required")?,
         height_size: height_size.ok_or("--height-size is required")?,
         color_input: color_input.ok_or("--color-input is required")?,
+        water_height_input,
+        water_flow_input,
         output: output.ok_or("--output is required")?,
         tile_size: tile_size.unwrap_or(DEFAULT_TILE_SIZE),
         tile_padding: tile_padding.unwrap_or(DEFAULT_TILE_PADDING),
@@ -227,8 +251,21 @@ fn build_worldmap(args: &Args) -> Result<WorldmapManifest, Box<dyn Error>> {
 
     let tile_count_x = args.height_size.width / args.tile_size;
     let tile_count_y = args.height_size.height / args.tile_size;
+    let water_source = load_water_source(args, tile_count_x, tile_count_y)?;
     let height_far_path = far_height_relative_path(&args.far_height_size);
     let color_far_path = far_color_relative_path(&args.far_color_size);
+    let water_manifest = water_source.as_ref().map(|water| WaterManifest {
+        source_width: water.size.width as u32,
+        source_height: water.size.height as u32,
+        tile_size_x: (water.size.width / tile_count_x) as u32,
+        tile_size_y: (water.size.height / tile_count_y) as u32,
+        mesh_format: WATER_MESH_FORMAT_WMESH1.to_owned(),
+        mesh_path: WATER_MESH_DIR.to_owned(),
+        flow_format: WATER_FLOW_FORMAT_RG8.to_owned(),
+        flow_path: WATER_FLOW_DIR.to_owned(),
+        ocean_raw_height: water.ocean_raw_height as u32,
+        ocean_height: water_height_to_world(water.ocean_raw_height, args.height_scale),
+    });
     let manifest = WorldmapManifest {
         name: args
             .name
@@ -252,6 +289,7 @@ fn build_worldmap(args: &Args) -> Result<WorldmapManifest, Box<dyn Error>> {
         color_far_path,
         color_far_width: u32::try_from(args.far_color_size.width)?,
         color_far_height: u32::try_from(args.far_color_size.height)?,
+        water: water_manifest,
     }
     .validate()?;
 
@@ -264,6 +302,10 @@ fn build_worldmap(args: &Args) -> Result<WorldmapManifest, Box<dyn Error>> {
 
     let far_color = box_downsample_rgba(color.as_raw(), &args.height_size, &args.far_color_size);
     write_output(args.output.join(&manifest.color_far_path), &far_color)?;
+
+    if let Some(water) = &water_source {
+        write_water_tiles(&height_bytes, &args.height_size, water, args, &manifest)?;
+    }
 
     manifest.write_to(args.output.join(MANIFEST_FILE_NAME))?;
 
@@ -304,8 +346,436 @@ fn validate_args(args: &Args) -> Result<(), Box<dyn Error>> {
     {
         return Err("source color size must be evenly divisible by far color size".into());
     }
+    if args.water_height_input.is_some() != args.water_flow_input.is_some() {
+        return Err("--water-height-input and --water-flow-input must be provided together".into());
+    }
 
     Ok(())
+}
+
+struct WaterSource {
+    height: Vec<u16>,
+    flow_rgb: Vec<u8>,
+    size: Size,
+    ocean_raw_height: u16,
+    ocean_tolerance_raw: u16,
+}
+
+#[derive(Clone, Copy)]
+struct WaterMeshVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+}
+
+struct WaterMesh {
+    vertices: Vec<WaterMeshVertex>,
+    indices: Vec<u32>,
+}
+
+fn load_water_source(
+    args: &Args,
+    tile_count_x: usize,
+    tile_count_y: usize,
+) -> Result<Option<WaterSource>, Box<dyn Error>> {
+    let Some(height_path) = args.water_height_input.as_ref() else {
+        return Ok(None);
+    };
+    let flow_path = args
+        .water_flow_input
+        .as_ref()
+        .expect("water flow input should be present when water height input is present");
+    let (height, size) = read_water_height_png(height_path)?;
+    let (flow_rgb, flow_size) = read_water_flow_png(flow_path)?;
+
+    if flow_size != size {
+        return Err(format!(
+            "{} is {}x{}, expected {}x{} to match water height input",
+            flow_path.display(),
+            flow_size.width,
+            flow_size.height,
+            size.width,
+            size.height
+        )
+        .into());
+    }
+    if size.width % tile_count_x != 0 || size.height % tile_count_y != 0 {
+        return Err("water dimensions must be evenly divisible by terrain tile counts".into());
+    }
+
+    let ocean_raw_height = detect_ocean_raw_height(&height, &size)?;
+    let ocean_tolerance_raw = ocean_tolerance_raw(args.height_scale);
+
+    Ok(Some(WaterSource {
+        height,
+        flow_rgb,
+        size,
+        ocean_raw_height,
+        ocean_tolerance_raw,
+    }))
+}
+
+fn read_water_height_png(path: &Path) -> Result<(Vec<u16>, Size), Box<dyn Error>> {
+    let mut reader = image::ImageReader::open(path).map_err(|error| {
+        format!(
+            "failed to open water height PNG {}: {error}",
+            path.display()
+        )
+    })?;
+    reader.no_limits();
+    let image = reader
+        .decode()
+        .map_err(|error| {
+            format!(
+                "failed to decode water height PNG {}: {error}",
+                path.display()
+            )
+        })?
+        .to_luma16();
+    let size = Size {
+        width: image.width() as usize,
+        height: image.height() as usize,
+    };
+
+    Ok((image.into_raw(), size))
+}
+
+fn read_water_flow_png(path: &Path) -> Result<(Vec<u8>, Size), Box<dyn Error>> {
+    let mut reader = image::ImageReader::open(path)
+        .map_err(|error| format!("failed to open water flow PNG {}: {error}", path.display()))?;
+    reader.no_limits();
+    let image = reader
+        .decode()
+        .map_err(|error| {
+            format!(
+                "failed to decode water flow PNG {}: {error}",
+                path.display()
+            )
+        })?
+        .to_rgb8();
+    let size = Size {
+        width: image.width() as usize,
+        height: image.height() as usize,
+    };
+
+    Ok((image.into_raw(), size))
+}
+
+fn detect_ocean_raw_height(water_height: &[u16], size: &Size) -> Result<u16, Box<dyn Error>> {
+    let mut counts = HashMap::<u16, usize>::new();
+
+    for x in 0..size.width {
+        count_border_water(water_height, size.width, x, 0, &mut counts);
+        count_border_water(water_height, size.width, x, size.height - 1, &mut counts);
+    }
+    for y in 1..size.height.saturating_sub(1) {
+        count_border_water(water_height, size.width, 0, y, &mut counts);
+        count_border_water(water_height, size.width, size.width - 1, y, &mut counts);
+    }
+
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(height, _)| height)
+        .ok_or_else(|| "water height map has no non-zero border water for ocean detection".into())
+}
+
+fn count_border_water(
+    water_height: &[u16],
+    width: usize,
+    x: usize,
+    y: usize,
+    counts: &mut HashMap<u16, usize>,
+) {
+    let height = water_height[y * width + x];
+    if height > 0 {
+        *counts.entry(height).or_insert(0) += 1;
+    }
+}
+
+fn ocean_tolerance_raw(height_scale: f32) -> u16 {
+    ((OCEAN_HEIGHT_TOLERANCE_WORLD / height_scale) * u16::MAX as f32)
+        .ceil()
+        .max(1.0) as u16
+}
+
+fn write_water_tiles(
+    terrain_height: &[u8],
+    terrain_size: &Size,
+    water: &WaterSource,
+    args: &Args,
+    manifest: &WorldmapManifest,
+) -> Result<(), Box<dyn Error>> {
+    let mesh_dir = args.output.join(WATER_MESH_DIR);
+    let flow_dir = args.output.join(WATER_FLOW_DIR);
+    fs::create_dir_all(&mesh_dir)?;
+    fs::create_dir_all(&flow_dir)?;
+
+    for tile_y in 0..manifest.tile_count_y as usize {
+        for tile_x in 0..manifest.tile_count_x as usize {
+            let mesh =
+                build_water_tile_mesh(terrain_height, terrain_size, water, args, tile_x, tile_y);
+            write_water_mesh(
+                mesh_dir.join(water_mesh_tile_file_name(
+                    u32::try_from(tile_x)?,
+                    u32::try_from(tile_y)?,
+                )),
+                &mesh,
+            )?;
+            let flow = water_flow_tile(water, manifest, tile_x, tile_y);
+            write_output(
+                flow_dir.join(water_flow_tile_file_name(
+                    u32::try_from(tile_x)?,
+                    u32::try_from(tile_y)?,
+                )),
+                &flow,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn build_water_tile_mesh(
+    terrain_height: &[u8],
+    terrain_size: &Size,
+    water: &WaterSource,
+    args: &Args,
+    tile_x: usize,
+    tile_y: usize,
+) -> WaterMesh {
+    let water_tile_width = water.size.width / (args.height_size.width / args.tile_size);
+    let water_tile_height = water.size.height / (args.height_size.height / args.tile_size);
+    let start_x = tile_x * water_tile_width;
+    let start_y = tile_y * water_tile_height;
+    let end_x = start_x + water_tile_width;
+    let end_y = start_y + water_tile_height;
+    let mut mesh = WaterMesh {
+        vertices: Vec::new(),
+        indices: Vec::new(),
+    };
+
+    for y in start_y..end_y {
+        for x in start_x..end_x {
+            if !is_mesh_water_cell(water, x, y) {
+                continue;
+            }
+
+            add_water_cell(&mut mesh, terrain_height, terrain_size, water, args, x, y);
+        }
+    }
+
+    mesh
+}
+
+fn add_water_cell(
+    mesh: &mut WaterMesh,
+    terrain_height: &[u8],
+    terrain_size: &Size,
+    water: &WaterSource,
+    args: &Args,
+    x: usize,
+    y: usize,
+) {
+    let h00 = water_height_at_or_cell(water, x, y, x, y);
+    let h10 = water_height_at_or_cell(water, x + 1, y, x, y);
+    let h11 = water_height_at_or_cell(water, x + 1, y + 1, x, y);
+    let h01 = water_height_at_or_cell(water, x, y + 1, x, y);
+    let p00 = water_top_position(water, args, x, y, h00);
+    let p10 = water_top_position(water, args, x + 1, y, h10);
+    let p11 = water_top_position(water, args, x + 1, y + 1, h11);
+    let p01 = water_top_position(water, args, x, y + 1, h01);
+
+    add_quad(mesh, p00, p10, p11, p01);
+
+    if x == 0 || !is_mesh_water_cell(water, x - 1, y) {
+        add_water_skirt(mesh, terrain_height, terrain_size, args, p01, p00);
+    }
+    if !is_mesh_water_cell(water, x + 1, y) {
+        add_water_skirt(mesh, terrain_height, terrain_size, args, p10, p11);
+    }
+    if y == 0 || !is_mesh_water_cell(water, x, y - 1) {
+        add_water_skirt(mesh, terrain_height, terrain_size, args, p00, p10);
+    }
+    if !is_mesh_water_cell(water, x, y + 1) {
+        add_water_skirt(mesh, terrain_height, terrain_size, args, p11, p01);
+    }
+}
+
+fn add_water_skirt(
+    mesh: &mut WaterMesh,
+    terrain_height: &[u8],
+    terrain_size: &Size,
+    args: &Args,
+    a: [f32; 3],
+    b: [f32; 3],
+) {
+    let bottom_a = water_skirt_bottom(terrain_height, terrain_size, args, a);
+    let bottom_b = water_skirt_bottom(terrain_height, terrain_size, args, b);
+    add_quad(mesh, a, b, [b[0], bottom_b, b[2]], [a[0], bottom_a, a[2]]);
+}
+
+fn water_skirt_bottom(
+    terrain_height: &[u8],
+    terrain_size: &Size,
+    args: &Args,
+    point: [f32; 3],
+) -> f32 {
+    let terrain =
+        sample_terrain_height_world(terrain_height, terrain_size, args, point[0], point[2])
+            - WATER_SKIRT_TERRAIN_CLEARANCE;
+    let water = point[1] - WATER_SKIRT_DROP;
+
+    terrain.min(water).max(0.0)
+}
+
+fn add_quad(mesh: &mut WaterMesh, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]) {
+    let start = mesh.vertices.len() as u32;
+    for position in [a, b, c, d] {
+        mesh.vertices.push(WaterMeshVertex {
+            position,
+            normal: [0.0, 1.0, 0.0],
+            uv: [position[0], position[2]],
+        });
+    }
+    mesh.indices
+        .extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+}
+
+fn is_mesh_water_cell(water: &WaterSource, x: usize, y: usize) -> bool {
+    if x >= water.size.width || y >= water.size.height {
+        return false;
+    }
+
+    let raw = water.height[y * water.size.width + x];
+    raw > 0 && !is_ocean_raw(water, raw)
+}
+
+fn is_ocean_raw(water: &WaterSource, raw: u16) -> bool {
+    raw.abs_diff(water.ocean_raw_height) <= water.ocean_tolerance_raw
+}
+
+fn water_height_at_or_cell(
+    water: &WaterSource,
+    x: usize,
+    y: usize,
+    cell_x: usize,
+    cell_y: usize,
+) -> u16 {
+    let sample_x = x.min(water.size.width - 1);
+    let sample_y = y.min(water.size.height - 1);
+    let raw = water.height[sample_y * water.size.width + sample_x];
+    if raw > 0 {
+        raw
+    } else {
+        water.height[cell_y * water.size.width + cell_x]
+    }
+}
+
+fn water_top_position(
+    water: &WaterSource,
+    args: &Args,
+    x: usize,
+    y: usize,
+    raw_height: u16,
+) -> [f32; 3] {
+    let terrain_width = args.height_size.width as f32 * args.horizontal_scale;
+    let terrain_depth = args.height_size.height as f32 * args.horizontal_scale;
+
+    [
+        x as f32 / water.size.width as f32 * terrain_width,
+        water_height_to_world(raw_height, args.height_scale),
+        y as f32 / water.size.height as f32 * terrain_depth,
+    ]
+}
+
+fn water_height_to_world(raw_height: u16, height_scale: f32) -> f32 {
+    raw_height as f32 / u16::MAX as f32 * height_scale
+}
+
+fn sample_terrain_height_world(
+    terrain_height: &[u8],
+    terrain_size: &Size,
+    args: &Args,
+    world_x: f32,
+    world_y: f32,
+) -> f32 {
+    let terrain_width = args.height_size.width as f32 * args.horizontal_scale;
+    let terrain_depth = args.height_size.height as f32 * args.horizontal_scale;
+    let sample_x = (world_x / terrain_width * terrain_size.width as f32)
+        .clamp(0.0, (terrain_size.width - 1) as f32);
+    let sample_y = (world_y / terrain_depth * terrain_size.height as f32)
+        .clamp(0.0, (terrain_size.height - 1) as f32);
+    let x0 = sample_x.floor() as usize;
+    let y0 = sample_y.floor() as usize;
+    let x1 = (x0 + 1).min(terrain_size.width - 1);
+    let y1 = (y0 + 1).min(terrain_size.height - 1);
+    let tx = sample_x - x0 as f32;
+    let ty = sample_y - y0 as f32;
+    let h00 = read_r16(terrain_height, terrain_size.width, x0, y0) as f32;
+    let h10 = read_r16(terrain_height, terrain_size.width, x1, y0) as f32;
+    let h01 = read_r16(terrain_height, terrain_size.width, x0, y1) as f32;
+    let h11 = read_r16(terrain_height, terrain_size.width, x1, y1) as f32;
+    let h0 = h00 + (h10 - h00) * tx;
+    let h1 = h01 + (h11 - h01) * tx;
+
+    (h0 + (h1 - h0) * ty) / u16::MAX as f32 * args.height_scale
+}
+
+fn water_flow_tile(
+    water: &WaterSource,
+    manifest: &WorldmapManifest,
+    tile_x: usize,
+    tile_y: usize,
+) -> Vec<u8> {
+    let water_tile_width = water.size.width / manifest.tile_count_x as usize;
+    let water_tile_height = water.size.height / manifest.tile_count_y as usize;
+    let start_x = tile_x * water_tile_width;
+    let start_y = tile_y * water_tile_height;
+    let mut output = vec![0; water_tile_width * water_tile_height * RG_BYTES_PER_PIXEL];
+
+    for y in 0..water_tile_height {
+        for x in 0..water_tile_width {
+            let source_index =
+                ((start_y + y) * water.size.width + start_x + x) * RGB_BYTES_PER_PIXEL;
+            let output_index = (y * water_tile_width + x) * RG_BYTES_PER_PIXEL;
+            output[output_index] = water.flow_rgb[source_index];
+            output[output_index + 1] = water.flow_rgb[source_index + 1];
+        }
+    }
+
+    output
+}
+
+fn write_water_mesh(path: impl AsRef<Path>, mesh: &WaterMesh) -> Result<(), Box<dyn Error>> {
+    let vertex_count =
+        u32::try_from(mesh.vertices.len()).map_err(|_| "water mesh vertex count exceeds u32")?;
+    let index_count =
+        u32::try_from(mesh.indices.len()).map_err(|_| "water mesh index count exceeds u32")?;
+    let mut bytes = Vec::with_capacity(
+        WATER_MESH_MAGIC.len()
+            + 8
+            + mesh.vertices.len() * 32
+            + mesh.indices.len() * std::mem::size_of::<u32>(),
+    );
+    bytes.extend_from_slice(WATER_MESH_MAGIC);
+    bytes.extend_from_slice(&vertex_count.to_le_bytes());
+    bytes.extend_from_slice(&index_count.to_le_bytes());
+    for vertex in &mesh.vertices {
+        for value in vertex
+            .position
+            .iter()
+            .chain(vertex.normal.iter())
+            .chain(vertex.uv.iter())
+        {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    for index in &mesh.indices {
+        bytes.extend_from_slice(&index.to_le_bytes());
+    }
+
+    write_output(path, &bytes)
 }
 
 fn write_height_tiles(
@@ -558,6 +1028,7 @@ fn usage() -> &'static str {
         --height-input <source.r16> --height-size <WIDTHxHEIGHT> \\
         --color-input <source.png> --output <assets/worldmaps/name> \\
         --far-height-size <WIDTHxHEIGHT> --far-color-size <WIDTHxHEIGHT> \\
+        [--water-height-input <water.png> --water-flow-input <flow.png>] \\
         [--tile-size 1024] [--tile-padding 2] \\
         [--horizontal-scale 0.5] [--height-scale 535.5] [--name <name>]"
 }
@@ -565,7 +1036,7 @@ fn usage() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::RgbaImage;
+    use image::{ImageBuffer, Luma, RgbImage, RgbaImage};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn os_args(args: &[&str]) -> Vec<OsString> {
@@ -585,6 +1056,29 @@ mod tests {
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect()
+    }
+
+    fn write_luma16_png(path: &Path, width: u32, height: u32, values: Vec<u16>) {
+        let image = ImageBuffer::<Luma<u16>, Vec<u16>>::from_raw(width, height, values).unwrap();
+        image.save(path).unwrap();
+    }
+
+    fn water_mesh_counts(bytes: &[u8]) -> (u32, u32) {
+        assert_eq!(&bytes[0..WATER_MESH_MAGIC.len()], WATER_MESH_MAGIC);
+        let vertex_count = u32::from_le_bytes([
+            bytes[WATER_MESH_MAGIC.len()],
+            bytes[WATER_MESH_MAGIC.len() + 1],
+            bytes[WATER_MESH_MAGIC.len() + 2],
+            bytes[WATER_MESH_MAGIC.len() + 3],
+        ]);
+        let index_count = u32::from_le_bytes([
+            bytes[WATER_MESH_MAGIC.len() + 4],
+            bytes[WATER_MESH_MAGIC.len() + 5],
+            bytes[WATER_MESH_MAGIC.len() + 6],
+            bytes[WATER_MESH_MAGIC.len() + 7],
+        ]);
+
+        (vertex_count, index_count)
     }
 
     #[test]
@@ -609,6 +1103,40 @@ mod tests {
         assert_eq!(args.tile_padding, DEFAULT_TILE_PADDING);
         assert_eq!(args.horizontal_scale, DEFAULT_HORIZONTAL_SCALE);
         assert_eq!(args.height_scale, DEFAULT_HEIGHT_SCALE);
+        assert!(args.water_height_input.is_none());
+        assert!(args.water_flow_input.is_none());
+    }
+
+    #[test]
+    fn rejects_single_water_input() {
+        let args = Args {
+            height_input: PathBuf::from("height.r16"),
+            height_size: Size {
+                width: 4,
+                height: 4,
+            },
+            color_input: PathBuf::from("color.png"),
+            water_height_input: Some(PathBuf::from("water.png")),
+            water_flow_input: None,
+            output: PathBuf::from("world"),
+            tile_size: 2,
+            tile_padding: 1,
+            far_height_size: Size {
+                width: 2,
+                height: 2,
+            },
+            far_color_size: Size {
+                width: 2,
+                height: 2,
+            },
+            horizontal_scale: 0.5,
+            height_scale: 10.0,
+            name: None,
+        };
+
+        let error = validate_args(&args).unwrap_err();
+
+        assert!(error.to_string().contains("provided together"));
     }
 
     #[test]
@@ -684,6 +1212,8 @@ mod tests {
                 height: 4,
             },
             color_input: color_path,
+            water_height_input: None,
+            water_flow_input: None,
             output: output.clone(),
             tile_size: 2,
             tile_padding: 1,
@@ -726,6 +1256,92 @@ mod tests {
                 .len(),
             4 * 4 * RGBA_BYTES_PER_PIXEL as u64
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn builds_worldmap_package_with_water() {
+        let dir = unique_temp_dir("build_worldmap_water");
+        let height_path = dir.join("source.r16");
+        let color_path = dir.join("source.png");
+        let water_height_path = dir.join("water.png");
+        let flow_path = dir.join("flow.png");
+        let output = dir.join("world");
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(
+            &height_path,
+            r16_bytes(&[
+                1, 2, 3, 4, //
+                5, 6, 7, 8, //
+                9, 10, 11, 12, //
+                13, 14, 15, 16,
+            ]),
+        )
+        .unwrap();
+        RgbaImage::from_raw(4, 4, vec![64; 4 * 4 * RGBA_BYTES_PER_PIXEL])
+            .unwrap()
+            .save(&color_path)
+            .unwrap();
+        write_luma16_png(
+            &water_height_path,
+            4,
+            4,
+            vec![
+                100, 100, 100, 100, //
+                100, 1000, 0, 100, //
+                100, 0, 1200, 100, //
+                100, 100, 100, 100,
+            ],
+        );
+        RgbImage::from_raw(4, 4, vec![127; 4 * 4 * RGB_BYTES_PER_PIXEL])
+            .unwrap()
+            .save(&flow_path)
+            .unwrap();
+
+        let args = Args {
+            height_input: height_path,
+            height_size: Size {
+                width: 4,
+                height: 4,
+            },
+            color_input: color_path,
+            water_height_input: Some(water_height_path),
+            water_flow_input: Some(flow_path),
+            output: output.clone(),
+            tile_size: 2,
+            tile_padding: 1,
+            far_height_size: Size {
+                width: 2,
+                height: 2,
+            },
+            far_color_size: Size {
+                width: 2,
+                height: 2,
+            },
+            horizontal_scale: 0.5,
+            height_scale: 10.0,
+            name: Some("test-water".to_owned()),
+        };
+
+        let manifest = build_worldmap(&args).unwrap();
+        let parsed = WorldmapManifest::load(output.join(MANIFEST_FILE_NAME)).unwrap();
+        let water = parsed.water.as_ref().unwrap();
+        let mesh_bytes = fs::read(output.join("water/mesh/tile_0000_0000.wmesh")).unwrap();
+        let flow_bytes = fs::read(output.join("water/flow/tile_0000_0000.rg8")).unwrap();
+        let (vertex_count, index_count) = water_mesh_counts(&mesh_bytes);
+
+        assert_eq!(parsed, manifest);
+        assert_eq!(water.source_width, 4);
+        assert_eq!(water.source_height, 4);
+        assert_eq!(water.tile_size_x, 2);
+        assert_eq!(water.tile_size_y, 2);
+        assert_eq!(water.ocean_raw_height, 100);
+        assert!(water.ocean_height > 0.0);
+        assert_eq!(flow_bytes.len(), 2 * 2 * RG_BYTES_PER_PIXEL);
+        assert!(vertex_count > 0);
+        assert!(index_count > 0);
 
         let _ = fs::remove_dir_all(dir);
     }

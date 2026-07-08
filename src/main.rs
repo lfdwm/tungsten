@@ -3,6 +3,7 @@ mod config;
 mod raster_model;
 mod renderer;
 mod terrain;
+mod water;
 
 use std::{
     env,
