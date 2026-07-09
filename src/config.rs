@@ -1,6 +1,7 @@
 use std::{error::Error, fs, io, path::PathBuf};
 
 use sdl3::gpu::PresentMode;
+use serde::Deserialize;
 
 pub(crate) const CONFIG_PATH: &str = "config.toml";
 const DEFAULT_WORLDMAP_PATH: &str = "assets/worldmaps/continent/manifest.toml";
@@ -35,7 +36,8 @@ const DEFAULT_RASTER_MODEL_HEIGHT: f32 = 120.0;
 const DEFAULT_RASTER_MODEL_SCALE: f32 = 1.0;
 const DEFAULT_RASTER_MODEL_YAW_DEGREES: f32 = 0.0;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct AppConfig {
     pub(crate) worldmap: PathBuf,
     pub(crate) tile_cache_radius: u32,
@@ -67,10 +69,13 @@ pub(crate) struct AppConfig {
     pub(crate) height_lod_blend_end: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) enum AppPresentMode {
+    #[serde(rename = "vsync", alias = "v-sync")]
     Vsync,
+    #[serde(rename = "immediate")]
     Immediate,
+    #[serde(rename = "mailbox")]
     Mailbox,
 }
 
@@ -139,130 +144,32 @@ impl AppConfig {
     }
 
     fn parse(contents: &str) -> Result<Self, String> {
-        let mut config = Self::default();
-        let mut seen_keys = Vec::new();
-
-        for (line_index, raw_line) in contents.lines().enumerate() {
-            let line_number = line_index + 1;
-            let line = raw_line
-                .split_once('#')
-                .map_or(raw_line, |(before_comment, _)| before_comment)
-                .trim();
-
-            if line.is_empty() {
-                continue;
-            }
-            if line.starts_with('[') {
-                return Err(format!(
-                    "line {line_number}: tables are not supported; use flat `key = value` entries"
-                ));
-            }
-
-            let (key, value) = line
-                .split_once('=')
-                .ok_or_else(|| format!("line {line_number}: expected `key = value`"))?;
-            let key = key.trim();
-            let value = value.trim();
-
-            if key.is_empty() {
-                return Err(format!("line {line_number}: config key is empty"));
-            }
-            if value.is_empty() {
-                return Err(format!("line {line_number}: value for `{key}` is empty"));
-            }
-            if seen_keys.iter().any(|seen_key| seen_key == key) {
-                return Err(format!("line {line_number}: duplicate config key `{key}`"));
-            }
-            seen_keys.push(key.to_owned());
-
-            match key {
-                "worldmap" => {
-                    config.worldmap = PathBuf::from(parse_config_string(key, value, line_number)?)
-                }
-                "tile_cache_radius" => {
-                    config.tile_cache_radius = parse_config_u32(key, value, line_number)?
-                }
-                "ray_iteration_count" => {
-                    config.ray_iteration_count = parse_config_u32(key, value, line_number)?
-                }
-                "performance_render_scale" => {
-                    config.performance_render_scale = parse_config_f32(key, value, line_number)?
-                }
-                "present_mode" => {
-                    config.present_mode = parse_present_mode_config(value, line_number)?
-                }
-                "max_framerate" => {
-                    config.max_framerate = parse_config_f32(key, value, line_number)?
-                }
-                "render_debug_visuals" => {
-                    config.render_debug_visuals = parse_config_bool(key, value, line_number)?
-                }
-                "raster_cube_enabled" => {
-                    config.raster_cube_enabled = parse_config_bool(key, value, line_number)?
-                }
-                "raster_cube_x" => {
-                    config.raster_cube_x = parse_config_f32(key, value, line_number)?
-                }
-                "raster_cube_y" => {
-                    config.raster_cube_y = parse_config_f32(key, value, line_number)?
-                }
-                "raster_cube_height" => {
-                    config.raster_cube_height = parse_config_f32(key, value, line_number)?
-                }
-                "raster_cube_size" => {
-                    config.raster_cube_size = parse_config_f32(key, value, line_number)?
-                }
-                "raster_model_enabled" => {
-                    config.raster_model_enabled = parse_config_bool(key, value, line_number)?
-                }
-                "raster_model_path" => {
-                    config.raster_model_path =
-                        PathBuf::from(parse_optional_config_string(value, line_number)?)
-                }
-                "raster_model_x" => {
-                    config.raster_model_x = parse_config_f32(key, value, line_number)?
-                }
-                "raster_model_y" => {
-                    config.raster_model_y = parse_config_f32(key, value, line_number)?
-                }
-                "raster_model_height" => {
-                    config.raster_model_height = parse_config_f32(key, value, line_number)?
-                }
-                "raster_model_scale" => {
-                    config.raster_model_scale = parse_config_f32(key, value, line_number)?
-                }
-                "raster_model_yaw_degrees" => {
-                    config.raster_model_yaw_degrees = parse_config_f32(key, value, line_number)?
-                }
-                "near_dda_distance" => {
-                    config.near_dda_distance = parse_config_f32(key, value, line_number)?
-                }
-                "near_dda_max_steps" => {
-                    config.near_dda_max_steps = parse_config_u32(key, value, line_number)?
-                }
-                "start_x" => config.start_x = parse_config_f32(key, value, line_number)?,
-                "start_y" => config.start_y = parse_config_f32(key, value, line_number)?,
-                "start_height" => config.start_height = parse_config_f32(key, value, line_number)?,
-                "normal_detail_blend_start" => {
-                    config.normal_detail_blend_start = parse_config_f32(key, value, line_number)?
-                }
-                "normal_detail_blend_end" => {
-                    config.normal_detail_blend_end = parse_config_f32(key, value, line_number)?
-                }
-                "height_lod_blend_start" => {
-                    config.height_lod_blend_start = parse_config_f32(key, value, line_number)?
-                }
-                "height_lod_blend_end" => {
-                    config.height_lod_blend_end = parse_config_f32(key, value, line_number)?
-                }
-                _ => return Err(format!("line {line_number}: unknown config key `{key}`")),
-            }
-        }
-
+        let config: Self = toml::from_str(contents).map_err(|error| error.to_string())?;
         config.validate()
     }
 
     fn validate(self) -> Result<Self, String> {
+        validate_finite_values(&[
+            ("performance_render_scale", self.performance_render_scale),
+            ("max_framerate", self.max_framerate),
+            ("raster_cube_x", self.raster_cube_x),
+            ("raster_cube_y", self.raster_cube_y),
+            ("raster_cube_height", self.raster_cube_height),
+            ("raster_cube_size", self.raster_cube_size),
+            ("raster_model_x", self.raster_model_x),
+            ("raster_model_y", self.raster_model_y),
+            ("raster_model_height", self.raster_model_height),
+            ("raster_model_scale", self.raster_model_scale),
+            ("raster_model_yaw_degrees", self.raster_model_yaw_degrees),
+            ("near_dda_distance", self.near_dda_distance),
+            ("start_x", self.start_x),
+            ("start_y", self.start_y),
+            ("start_height", self.start_height),
+            ("normal_detail_blend_start", self.normal_detail_blend_start),
+            ("normal_detail_blend_end", self.normal_detail_blend_end),
+            ("height_lod_blend_start", self.height_lod_blend_start),
+            ("height_lod_blend_end", self.height_lod_blend_end),
+        ])?;
         if self.worldmap.as_os_str().is_empty() {
             return Err("`worldmap` must not be empty".to_owned());
         }
@@ -330,97 +237,14 @@ impl AppConfig {
     }
 }
 
-fn parse_config_u32(key: &str, value: &str, line_number: usize) -> Result<u32, String> {
-    let normalized = value.replace('_', "");
-    normalized
-        .parse()
-        .map_err(|_| format!("line {line_number}: `{key}` must be an unsigned integer"))
-}
-
-fn parse_config_f32(key: &str, value: &str, line_number: usize) -> Result<f32, String> {
-    let normalized = value.replace('_', "");
-    let parsed: f32 = normalized
-        .parse()
-        .map_err(|_| format!("line {line_number}: `{key}` must be a number"))?;
-
-    if !parsed.is_finite() {
-        return Err(format!("line {line_number}: `{key}` must be finite"));
-    }
-
-    Ok(parsed)
-}
-
-fn parse_config_bool(key: &str, value: &str, line_number: usize) -> Result<bool, String> {
-    match value.to_ascii_lowercase().as_str() {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(format!(
-            "line {line_number}: `{key}` must be `true` or `false`"
-        )),
-    }
-}
-
-fn parse_present_mode_config(value: &str, line_number: usize) -> Result<AppPresentMode, String> {
-    let value = parse_config_string("present_mode", value, line_number)?;
-
-    match value.to_ascii_lowercase().as_str() {
-        "vsync" | "v-sync" => Ok(AppPresentMode::Vsync),
-        "immediate" => Ok(AppPresentMode::Immediate),
-        "mailbox" => Ok(AppPresentMode::Mailbox),
-        _ => Err(format!(
-            "line {line_number}: `present_mode` must be one of `vsync`, `immediate`, or `mailbox`"
-        )),
-    }
-}
-
-fn parse_config_string<'a>(
-    key: &str,
-    value: &'a str,
-    line_number: usize,
-) -> Result<&'a str, String> {
-    let value = value.trim();
-    let unquoted = if value.len() >= 2 {
-        let bytes = value.as_bytes();
-        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
-            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
-        {
-            &value[1..value.len() - 1]
-        } else {
-            value
+fn validate_finite_values(values: &[(&str, f32)]) -> Result<(), String> {
+    for (key, value) in values {
+        if !value.is_finite() {
+            return Err(format!("`{key}` must be finite"));
         }
-    } else {
-        value
-    };
-
-    if unquoted.is_empty() {
-        return Err(format!("line {line_number}: `{key}` must not be empty"));
     }
 
-    Ok(unquoted)
-}
-
-fn parse_optional_config_string(value: &str, line_number: usize) -> Result<&str, String> {
-    let value = value.trim();
-    let unquoted = if value.len() >= 2 {
-        let bytes = value.as_bytes();
-        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
-            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
-        {
-            &value[1..value.len() - 1]
-        } else {
-            value
-        }
-    } else {
-        value
-    };
-
-    if unquoted.contains('\0') {
-        return Err(format!(
-            "line {line_number}: config string must not contain NUL bytes"
-        ));
-    }
-
-    Ok(unquoted)
+    Ok(())
 }
 
 fn validate_blend_range(name: &str, start: f32, end: f32) -> Result<(), String> {
@@ -520,7 +344,13 @@ mod tests {
     #[test]
     fn parses_present_mode_values() {
         assert_eq!(
-            AppConfig::parse("present_mode = vsync")
+            AppConfig::parse("present_mode = \"vsync\"")
+                .unwrap()
+                .present_mode,
+            AppPresentMode::Vsync
+        );
+        assert_eq!(
+            AppConfig::parse("present_mode = \"v-sync\"")
                 .unwrap()
                 .present_mode,
             AppPresentMode::Vsync
@@ -537,6 +367,13 @@ mod tests {
                 .present_mode,
             AppPresentMode::Mailbox
         );
+    }
+
+    #[test]
+    fn rejects_unquoted_config_strings() {
+        let error = AppConfig::parse("present_mode = vsync").unwrap_err();
+
+        assert!(error.contains("invalid") || error.contains("expected"));
     }
 
     #[test]
@@ -572,7 +409,7 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        assert!(error.contains("present_mode"));
+        assert!(error.contains("triple"));
 
         let error = AppConfig::parse(
             r#"
@@ -604,7 +441,7 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        assert!(error.contains("render_debug_visuals"));
+        assert!(error.contains("invalid") || error.contains("expected"));
 
         let error = AppConfig::parse(
             r#"
@@ -612,7 +449,7 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        assert!(error.contains("raster_cube_enabled"));
+        assert!(error.contains("invalid") || error.contains("expected"));
 
         let error = AppConfig::parse(
             r#"
@@ -636,7 +473,7 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        assert!(error.contains("raster_model_enabled"));
+        assert!(error.contains("invalid") || error.contains("expected"));
 
         let error = AppConfig::parse(
             r#"
@@ -669,6 +506,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("worldmap"));
+    }
+
+    #[test]
+    fn rejects_non_finite_config_values() {
+        let error = AppConfig::parse(
+            r#"
+            performance_render_scale = nan
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("performance_render_scale"));
+        assert!(error.contains("finite"));
     }
 
     #[test]

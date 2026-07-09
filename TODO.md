@@ -1,7 +1,6 @@
 # TODO
 
 ## Refactor right now:
-- Use serde + toml instead of custom toml parsing
 - Beak out GPU upload into module
 - Use glam for vector math
 
