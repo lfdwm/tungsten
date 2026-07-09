@@ -7,7 +7,6 @@ layout(location = 2) in vec2 in_uv;
 layout(set = 1, binding = 0) uniform WaterParams {
     vec4 camera;
     vec4 render;
-    vec4 water;
     vec4 ray_forward;
     vec4 ray_right;
     vec4 ray_up;

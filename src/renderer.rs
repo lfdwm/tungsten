@@ -3,13 +3,13 @@ use std::{error::Error, mem::size_of};
 use glam::Vec3;
 use sdl3::{
     gpu::{
-        BufferBinding, ColorTargetDescription, ColorTargetInfo, CompareOp, CullMode,
-        DepthStencilState, DepthStencilTargetInfo, Device, FillMode, Filter, GraphicsPipeline,
-        GraphicsPipelineTargetInfo, IndexElementSize, LoadOp, PrimitiveType, RasterizerState,
-        Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode, ShaderFormat,
-        ShaderStage, StoreOp, Texture, TextureCreateInfo, TextureFormat, TextureSamplerBinding,
-        TextureType, TextureUsage, VertexAttribute, VertexBufferDescription, VertexElementFormat,
-        VertexInputRate, VertexInputState,
+        BlendFactor, BlendOp, BufferBinding, ColorTargetBlendState, ColorTargetDescription,
+        ColorTargetInfo, CompareOp, CullMode, DepthStencilState, DepthStencilTargetInfo, Device,
+        FillMode, Filter, GraphicsPipeline, GraphicsPipelineTargetInfo, IndexElementSize, LoadOp,
+        PrimitiveType, RasterizerState, Sampler, SamplerAddressMode, SamplerCreateInfo,
+        SamplerMipmapMode, ShaderFormat, ShaderStage, StoreOp, Texture, TextureCreateInfo,
+        TextureFormat, TextureSamplerBinding, TextureType, TextureUsage, VertexAttribute,
+        VertexBufferDescription, VertexElementFormat, VertexInputRate, VertexInputState,
     },
     pixels::Color,
     video::Window,
@@ -73,7 +73,6 @@ struct RasterParams {
 struct WaterParams {
     camera: [f32; 4],
     render: [f32; 4],
-    water: [f32; 4],
     ray_forward: [f32; 4],
     ray_right: [f32; 4],
     ray_up: [f32; 4],
@@ -592,7 +591,18 @@ fn create_water_pipeline(
         .with_target_info(
             GraphicsPipelineTargetInfo::new()
                 .with_color_target_descriptions(&[
-                    ColorTargetDescription::new().with_format(target_format),
+                    ColorTargetDescription::new()
+                        .with_format(target_format)
+                        .with_blend_state(
+                            ColorTargetBlendState::new()
+                                .with_enable_blend(true)
+                                .with_src_color_blendfactor(BlendFactor::SrcAlpha)
+                                .with_dst_color_blendfactor(BlendFactor::OneMinusSrcAlpha)
+                                .with_color_blend_op(BlendOp::Add)
+                                .with_src_alpha_blendfactor(BlendFactor::One)
+                                .with_dst_alpha_blendfactor(BlendFactor::OneMinusSrcAlpha)
+                                .with_alpha_blend_op(BlendOp::Add),
+                        ),
                     ColorTargetDescription::new().with_format(DEPTH_TARGET_FORMAT),
                 ])
                 .with_has_depth_stencil_target(true)
@@ -787,7 +797,6 @@ fn water_params(camera: &Camera, width: u32, height: u32) -> WaterParams {
             RAYMARCH_START_DISTANCE,
             camera.max_distance,
         ],
-        water: [0.04, 0.30, 0.38, 0.0],
         ray_forward: vec3_param(ray_basis.forward),
         ray_right: vec3_param(ray_basis.right_scaled),
         ray_up: vec3_param(ray_basis.up_scaled),

@@ -24,27 +24,27 @@ raster_model_scale = 1.0
 raster_model_yaw_degrees = 0.0
 
 # [ Platladan ]
-# present_mode = "vsync"
-# max_framerate = 200.0
-# performance_render_scale = 0.5
-# tile_cache_radius = 2
-# ray_iteration_count = 100
-# near_dda_distance = 512.0
-# near_dda_max_steps = 1024
-# height_lod_blend_start = 250.0
-# height_lod_blend_end = 600.0
-# normal_detail_blend_start = 500.0
-# normal_detail_blend_end = 1000.0
-
-# [ Dunderklumpen ]
-present_mode = "immediate"
+present_mode = "vsync"
 max_framerate = 200.0
-performance_render_scale = 0.33
-tile_cache_radius = 1
-ray_iteration_count = 250
-near_dda_distance = 32.0
-near_dda_max_steps = 128
-height_lod_blend_start = 200.0
-height_lod_blend_end = 328.0
+performance_render_scale = 0.5
+tile_cache_radius = 2
+ray_iteration_count = 100
+near_dda_distance = 512.0
+near_dda_max_steps = 1024
+height_lod_blend_start = 250.0
+height_lod_blend_end = 600.0
 normal_detail_blend_start = 500.0
 normal_detail_blend_end = 1000.0
+
+# [ Dunderklumpen ]
+# present_mode = "vsync"
+# max_framerate = 200.0
+# performance_render_scale = 0.33
+# tile_cache_radius = 1
+# ray_iteration_count = 250
+# near_dda_distance = 32.0
+# near_dda_max_steps = 128
+# height_lod_blend_start = 200.0
+# height_lod_blend_end = 328.0
+# normal_detail_blend_start = 500.0
+# normal_detail_blend_end = 1000.0
