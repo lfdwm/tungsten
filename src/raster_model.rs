@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use glam::{Vec2, Vec3, Vec4};
 use sdl3::gpu::{
     Buffer, BufferUsageFlags, CopyPass, Device, Filter, Sampler, SamplerAddressMode,
     SamplerCreateInfo, SamplerMipmapMode, Texture, TextureFormat, TextureUsage,
@@ -158,8 +159,8 @@ impl RasterModelCpu {
         Ok(Self {
             batches,
             materials,
-            bounds_min: bounds.min,
-            bounds_max: bounds.max,
+            bounds_min: bounds.min.to_array(),
+            bounds_max: bounds.max.to_array(),
         })
     }
 
@@ -176,8 +177,8 @@ impl RasterModelCpu {
                 material_index: 0,
             }],
             materials: vec![RasterMaterialCpu::cube()],
-            bounds_min: bounds.min,
-            bounds_max: bounds.max,
+            bounds_min: bounds.min.to_array(),
+            bounds_max: bounds.max.to_array(),
         }
     }
 }
@@ -204,13 +205,14 @@ impl RasterMeshCpu {
             ];
             let normal = if has_normals {
                 normalize_or(
-                    [
+                    Vec3::new(
                         mesh.normals[index * 3] as f32,
                         mesh.normals[index * 3 + 1] as f32,
                         mesh.normals[index * 3 + 2] as f32,
-                    ],
-                    [0.0, 1.0, 0.0],
+                    ),
+                    Vec3::Y,
                 )
+                .to_array()
             } else {
                 [0.0, 0.0, 0.0]
             };
@@ -557,159 +559,120 @@ fn generate_normals(vertices: &mut [RasterVertex], indices: &[u32]) {
         let i0 = triangle[0] as usize;
         let i1 = triangle[1] as usize;
         let i2 = triangle[2] as usize;
-        let p0 = vertices[i0].position;
-        let p1 = vertices[i1].position;
-        let p2 = vertices[i2].position;
-        let normal = cross(sub(p1, p0), sub(p2, p0));
+        let p0 = Vec3::from_array(vertices[i0].position);
+        let p1 = Vec3::from_array(vertices[i1].position);
+        let p2 = Vec3::from_array(vertices[i2].position);
+        let normal = (p1 - p0).cross(p2 - p0);
 
-        vertices[i0].normal = add(vertices[i0].normal, normal);
-        vertices[i1].normal = add(vertices[i1].normal, normal);
-        vertices[i2].normal = add(vertices[i2].normal, normal);
+        for index in [i0, i1, i2] {
+            vertices[index].normal = (Vec3::from_array(vertices[index].normal) + normal).to_array();
+        }
     }
 
     for vertex in vertices.iter_mut() {
-        vertex.normal = normalize_or(vertex.normal, [0.0, 1.0, 0.0]);
+        vertex.normal = normalize_or(Vec3::from_array(vertex.normal), Vec3::Y).to_array();
     }
 }
 
 fn generate_tangents(vertices: &mut [RasterVertex], indices: &[u32], has_texcoords: bool) {
     if !has_texcoords {
         for vertex in vertices.iter_mut() {
-            vertex.tangent = fallback_tangent(vertex.normal);
+            vertex.tangent = fallback_tangent(Vec3::from_array(vertex.normal)).to_array();
         }
         return;
     }
 
-    let mut tangent_sums = vec![[0.0; 3]; vertices.len()];
-    let mut bitangent_sums = vec![[0.0; 3]; vertices.len()];
+    let mut tangent_sums = vec![Vec3::ZERO; vertices.len()];
+    let mut bitangent_sums = vec![Vec3::ZERO; vertices.len()];
 
     for triangle in indices.chunks_exact(3) {
         let i0 = triangle[0] as usize;
         let i1 = triangle[1] as usize;
         let i2 = triangle[2] as usize;
 
-        let p0 = vertices[i0].position;
-        let p1 = vertices[i1].position;
-        let p2 = vertices[i2].position;
-        let uv0 = vertices[i0].texcoord;
-        let uv1 = vertices[i1].texcoord;
-        let uv2 = vertices[i2].texcoord;
-        let edge1 = sub(p1, p0);
-        let edge2 = sub(p2, p0);
-        let delta_uv1 = [uv1[0] - uv0[0], uv1[1] - uv0[1]];
-        let delta_uv2 = [uv2[0] - uv0[0], uv2[1] - uv0[1]];
-        let determinant = delta_uv1[0] * delta_uv2[1] - delta_uv2[0] * delta_uv1[1];
+        let p0 = Vec3::from_array(vertices[i0].position);
+        let p1 = Vec3::from_array(vertices[i1].position);
+        let p2 = Vec3::from_array(vertices[i2].position);
+        let uv0 = Vec2::from_array(vertices[i0].texcoord);
+        let uv1 = Vec2::from_array(vertices[i1].texcoord);
+        let uv2 = Vec2::from_array(vertices[i2].texcoord);
+        let edge1 = p1 - p0;
+        let edge2 = p2 - p0;
+        let delta_uv1 = uv1 - uv0;
+        let delta_uv2 = uv2 - uv0;
+        let determinant = delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y;
         if determinant.abs() <= 0.000001 {
             continue;
         }
 
         let inverse = 1.0 / determinant;
-        let tangent = scale(
-            sub(scale(edge1, delta_uv2[1]), scale(edge2, delta_uv1[1])),
-            inverse,
-        );
-        let bitangent = scale(
-            sub(scale(edge2, delta_uv1[0]), scale(edge1, delta_uv2[0])),
-            inverse,
-        );
+        let tangent = (edge1 * delta_uv2.y - edge2 * delta_uv1.y) * inverse;
+        let bitangent = (edge2 * delta_uv1.x - edge1 * delta_uv2.x) * inverse;
 
         for &index in &[i0, i1, i2] {
-            tangent_sums[index] = add(tangent_sums[index], tangent);
-            bitangent_sums[index] = add(bitangent_sums[index], bitangent);
+            tangent_sums[index] += tangent;
+            bitangent_sums[index] += bitangent;
         }
     }
 
     for (index, vertex) in vertices.iter_mut().enumerate() {
-        let normal = normalize_or(vertex.normal, [0.0, 1.0, 0.0]);
+        let normal = normalize_or(Vec3::from_array(vertex.normal), Vec3::Y);
         let tangent_sum = tangent_sums[index];
-        let orthogonal_tangent = sub(tangent_sum, scale(normal, dot(normal, tangent_sum)));
-        let tangent = normalize_or(orthogonal_tangent, fallback_tangent(normal).first_three());
-        let handedness = if dot(cross(normal, tangent), bitangent_sums[index]) < 0.0 {
+        let orthogonal_tangent = tangent_sum - normal * normal.dot(tangent_sum);
+        let fallback = fallback_tangent(normal);
+        let fallback = Vec3::new(fallback.x, fallback.y, fallback.z);
+        let tangent = normalize_or(orthogonal_tangent, fallback);
+        let handedness = if normal.cross(tangent).dot(bitangent_sums[index]) < 0.0 {
             -1.0
         } else {
             1.0
         };
 
-        vertex.normal = normal;
-        vertex.tangent = [tangent[0], tangent[1], tangent[2], handedness];
+        vertex.normal = normal.to_array();
+        vertex.tangent = Vec4::new(tangent.x, tangent.y, tangent.z, handedness).to_array();
     }
 }
 
-fn fallback_tangent(normal: [f32; 3]) -> [f32; 4] {
-    let axis = if normal[1].abs() < 0.9 {
-        [0.0, 1.0, 0.0]
+fn fallback_tangent(normal: Vec3) -> Vec4 {
+    let axis = if normal.y.abs() < 0.9 {
+        Vec3::Y
     } else {
-        [1.0, 0.0, 0.0]
+        Vec3::X
     };
-    let tangent = normalize_or(cross(axis, normal), [1.0, 0.0, 0.0]);
+    let tangent = normalize_or(axis.cross(normal), Vec3::X);
 
-    [tangent[0], tangent[1], tangent[2], 1.0]
-}
-
-trait FirstThree {
-    fn first_three(self) -> [f32; 3];
-}
-
-impl FirstThree for [f32; 4] {
-    fn first_three(self) -> [f32; 3] {
-        [self[0], self[1], self[2]]
-    }
+    Vec4::new(tangent.x, tangent.y, tangent.z, 1.0)
 }
 
 #[derive(Clone, Copy)]
 struct ModelBounds {
-    min: [f32; 3],
-    max: [f32; 3],
+    min: Vec3,
+    max: Vec3,
 }
 
 impl ModelBounds {
     fn empty() -> Self {
         Self {
-            min: [f32::INFINITY; 3],
-            max: [f32::NEG_INFINITY; 3],
+            min: Vec3::splat(f32::INFINITY),
+            max: Vec3::splat(f32::NEG_INFINITY),
         }
     }
 
     fn include_vertices(&mut self, vertices: &[RasterVertex]) {
         for vertex in vertices {
-            for axis in 0..3 {
-                self.min[axis] = self.min[axis].min(vertex.position[axis]);
-                self.max[axis] = self.max[axis].max(vertex.position[axis]);
-            }
+            let position = Vec3::from_array(vertex.position);
+            self.min = self.min.min(position);
+            self.max = self.max.max(position);
         }
     }
 }
 
-fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn scale(value: [f32; 3], factor: f32) -> [f32; 3] {
-    [value[0] * factor, value[1] * factor, value[2] * factor]
-}
-
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn normalize_or(value: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
-    let length_sq = dot(value, value);
+fn normalize_or(value: Vec3, fallback: Vec3) -> Vec3 {
+    let length_sq = value.length_squared();
     if length_sq <= 0.00000001 {
         fallback
     } else {
-        scale(value, length_sq.sqrt().recip())
+        value * length_sq.sqrt().recip()
     }
 }
 

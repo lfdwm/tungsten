@@ -1,5 +1,6 @@
 use std::{error::Error, mem::size_of};
 
+use glam::Vec3;
 use sdl3::{
     gpu::{
         BufferBinding, ColorTargetDescription, ColorTargetInfo, CompareOp, CullMode,
@@ -769,24 +770,9 @@ fn raster_params(
         material_diffuse,
         material_specular,
         material_flags,
-        ray_forward: [
-            ray_basis.forward[0],
-            ray_basis.forward[1],
-            ray_basis.forward[2],
-            0.0,
-        ],
-        ray_right: [
-            ray_basis.right_scaled[0],
-            ray_basis.right_scaled[1],
-            ray_basis.right_scaled[2],
-            0.0,
-        ],
-        ray_up: [
-            ray_basis.up_scaled[0],
-            ray_basis.up_scaled[1],
-            ray_basis.up_scaled[2],
-            0.0,
-        ],
+        ray_forward: vec3_param(ray_basis.forward),
+        ray_right: vec3_param(ray_basis.right_scaled),
+        ray_up: vec3_param(ray_basis.up_scaled),
     }
 }
 
@@ -802,24 +788,9 @@ fn water_params(camera: &Camera, width: u32, height: u32) -> WaterParams {
             camera.max_distance,
         ],
         water: [0.04, 0.30, 0.38, 0.0],
-        ray_forward: [
-            ray_basis.forward[0],
-            ray_basis.forward[1],
-            ray_basis.forward[2],
-            0.0,
-        ],
-        ray_right: [
-            ray_basis.right_scaled[0],
-            ray_basis.right_scaled[1],
-            ray_basis.right_scaled[2],
-            0.0,
-        ],
-        ray_up: [
-            ray_basis.up_scaled[0],
-            ray_basis.up_scaled[1],
-            ray_basis.up_scaled[2],
-            0.0,
-        ],
+        ray_forward: vec3_param(ray_basis.forward),
+        ray_right: vec3_param(ray_basis.right_scaled),
+        ray_up: vec3_param(ray_basis.up_scaled),
     }
 }
 
@@ -980,74 +951,37 @@ fn shader_params(
             0.0,
         ],
         debug: [debug_visual_mode.as_shader_value(), 0.0, 0.0, 0.0],
-        ray_forward: [
-            ray_basis.forward[0],
-            ray_basis.forward[1],
-            ray_basis.forward[2],
-            0.0,
-        ],
-        ray_right: [
-            ray_basis.right_scaled[0],
-            ray_basis.right_scaled[1],
-            ray_basis.right_scaled[2],
-            0.0,
-        ],
-        ray_up: [
-            ray_basis.up_scaled[0],
-            ray_basis.up_scaled[1],
-            ray_basis.up_scaled[2],
-            0.0,
-        ],
+        ray_forward: vec3_param(ray_basis.forward),
+        ray_right: vec3_param(ray_basis.right_scaled),
+        ray_up: vec3_param(ray_basis.up_scaled),
     }
 }
 
 struct RayBasis {
-    forward: [f32; 3],
-    right_scaled: [f32; 3],
-    up_scaled: [f32; 3],
+    forward: Vec3,
+    right_scaled: Vec3,
+    up_scaled: Vec3,
 }
 
 fn camera_ray_basis(camera: &Camera, width: u32, height: u32) -> RayBasis {
-    let sin_yaw = camera.yaw.sin();
-    let cos_yaw = camera.yaw.cos();
-    let sin_pitch = camera.pitch.sin();
-    let cos_pitch = camera.pitch.cos();
-    let forward_flat = [sin_yaw, 0.0, -cos_yaw];
-    let right = [cos_yaw, 0.0, sin_yaw];
-    let world_up = [0.0, 1.0, 0.0];
-    let forward = normalize3(add3(
-        scale3(forward_flat, cos_pitch),
-        scale3(world_up, sin_pitch),
-    ));
-    let up = normalize3(add3(
-        scale3(world_up, cos_pitch),
-        scale3(forward_flat, -sin_pitch),
-    ));
+    let (sin_yaw, cos_yaw) = camera.yaw.sin_cos();
+    let (sin_pitch, cos_pitch) = camera.pitch.sin_cos();
+    let forward_flat = Vec3::new(sin_yaw, 0.0, -cos_yaw);
+    let right = Vec3::new(cos_yaw, 0.0, sin_yaw);
+    let forward = (forward_flat * cos_pitch + Vec3::Y * sin_pitch).normalize();
+    let up = (Vec3::Y * cos_pitch - forward_flat * sin_pitch).normalize();
     let aspect = width as f32 / (height as f32).max(1.0);
     let tan_half_fov = (camera.vertical_fov * 0.5).tan();
 
     RayBasis {
         forward,
-        right_scaled: scale3(right, aspect * tan_half_fov),
-        up_scaled: scale3(up, tan_half_fov),
+        right_scaled: right * aspect * tan_half_fov,
+        up_scaled: up * tan_half_fov,
     }
 }
 
-fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn scale3(v: [f32; 3], scale: f32) -> [f32; 3] {
-    [v[0] * scale, v[1] * scale, v[2] * scale]
-}
-
-fn normalize3(v: [f32; 3]) -> [f32; 3] {
-    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if length > 0.0 {
-        [v[0] / length, v[1] / length, v[2] / length]
-    } else {
-        v
-    }
+fn vec3_param(value: Vec3) -> [f32; 4] {
+    [value.x, value.y, value.z, 0.0]
 }
 
 #[cfg(test)]

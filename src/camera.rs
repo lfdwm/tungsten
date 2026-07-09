@@ -6,6 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use glam::Vec2;
 use sdl3::keyboard::Scancode;
 
 use crate::terrain::HeightField;
@@ -589,31 +590,26 @@ pub(crate) fn update_freecam(
     let move_speed = 135.0;
     let height_speed = 80.0;
 
-    let forward = [camera.yaw.sin(), -camera.yaw.cos()];
-    let right = [camera.yaw.cos(), camera.yaw.sin()];
-    let mut movement = [0.0, 0.0];
+    let (forward, right) = horizontal_camera_axes(camera.yaw);
+    let mut movement = Vec2::ZERO;
 
     if keyboard.is_scancode_pressed(Scancode::W) {
-        movement[0] += forward[0];
-        movement[1] += forward[1];
+        movement += forward;
     }
     if keyboard.is_scancode_pressed(Scancode::S) {
-        movement[0] -= forward[0];
-        movement[1] -= forward[1];
+        movement -= forward;
     }
     if keyboard.is_scancode_pressed(Scancode::D) {
-        movement[0] += right[0];
-        movement[1] += right[1];
+        movement += right;
     }
     if keyboard.is_scancode_pressed(Scancode::A) {
-        movement[0] -= right[0];
-        movement[1] -= right[1];
+        movement -= right;
     }
 
-    let length = (movement[0] * movement[0] + movement[1] * movement[1]).sqrt();
-    if length > 0.0 {
-        camera.x += movement[0] / length * move_speed * dt;
-        camera.y += movement[1] / length * move_speed * dt;
+    if movement.length_squared() > 0.0 {
+        let movement = movement.normalize() * move_speed * dt;
+        camera.x += movement.x;
+        camera.y += movement.y;
     }
 
     if keyboard.is_scancode_pressed(Scancode::R) {
@@ -681,7 +677,7 @@ pub(crate) fn update_gravity_camera(
 }
 
 pub(crate) fn terrain_full_map_distance(terrain_size: [f32; 2]) -> f32 {
-    terrain_size[0].hypot(terrain_size[1])
+    Vec2::from_array(terrain_size).length()
 }
 
 pub(crate) fn apply_gravity_wheel_adjustment(
@@ -729,34 +725,34 @@ fn update_player_horizontal_movement(
     dt: f32,
 ) {
     let keyboard = events.keyboard_state();
-    let forward = [camera.yaw.sin(), -camera.yaw.cos()];
-    let right = [camera.yaw.cos(), camera.yaw.sin()];
-    let mut movement = [0.0, 0.0];
+    let (forward, right) = horizontal_camera_axes(camera.yaw);
+    let mut movement = Vec2::ZERO;
 
     if keyboard.is_scancode_pressed(Scancode::W) {
-        movement[0] += forward[0];
-        movement[1] += forward[1];
+        movement += forward;
     }
     if keyboard.is_scancode_pressed(Scancode::S) {
-        movement[0] -= forward[0];
-        movement[1] -= forward[1];
+        movement -= forward;
     }
     if keyboard.is_scancode_pressed(Scancode::D) {
-        movement[0] += right[0];
-        movement[1] += right[1];
+        movement += right;
     }
     if keyboard.is_scancode_pressed(Scancode::A) {
-        movement[0] -= right[0];
-        movement[1] -= right[1];
+        movement -= right;
     }
 
-    let length = (movement[0] * movement[0] + movement[1] * movement[1]).sqrt();
-    if length > 0.0 {
-        camera.x += movement[0] / length * move_speed * dt;
-        camera.y += movement[1] / length * move_speed * dt;
+    if movement.length_squared() > 0.0 {
+        let movement = movement.normalize() * move_speed * dt;
+        camera.x += movement.x;
+        camera.y += movement.y;
         camera.x = camera.x.clamp(0.0, collision_height.terrain_size[0]);
         camera.y = camera.y.clamp(0.0, collision_height.terrain_size[1]);
     }
+}
+
+fn horizontal_camera_axes(yaw: f32) -> (Vec2, Vec2) {
+    let (sin_yaw, cos_yaw) = yaw.sin_cos();
+    (Vec2::new(sin_yaw, -cos_yaw), Vec2::new(cos_yaw, sin_yaw))
 }
 
 fn collide_player_with_terrain(

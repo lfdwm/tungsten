@@ -1,8 +1,5 @@
 # TODO
 
-## Refactor right now:
-- Use glam for vector math
-
 ## Future:
 - Refactor renderer to more cleanly work with more abstracted render passes
   / render graph.
