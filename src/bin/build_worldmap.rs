@@ -38,8 +38,8 @@ struct Args {
     height_input: PathBuf,
     height_size: Size,
     color_input: PathBuf,
-    water_height_input: Option<PathBuf>,
-    water_flow_input: Option<PathBuf>,
+    water_height_input: PathBuf,
+    water_flow_input: PathBuf,
     output: PathBuf,
     tile_size: usize,
     tile_padding: usize,
@@ -137,8 +137,8 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Args, Box<dyn 
         height_input: height_input.ok_or("--height-input is required")?,
         height_size: height_size.ok_or("--height-size is required")?,
         color_input: color_input.ok_or("--color-input is required")?,
-        water_height_input,
-        water_flow_input,
+        water_height_input: water_height_input.ok_or("--water-height-input is required")?,
+        water_flow_input: water_flow_input.ok_or("--water-flow-input is required")?,
         output: output.ok_or("--output is required")?,
         tile_size: tile_size.unwrap_or(DEFAULT_TILE_SIZE),
         tile_padding: tile_padding.unwrap_or(DEFAULT_TILE_PADDING),
@@ -254,18 +254,18 @@ fn build_worldmap(args: &Args) -> Result<WorldmapManifest, Box<dyn Error>> {
     let water_source = load_water_source(args, tile_count_x, tile_count_y)?;
     let height_far_path = far_height_relative_path(&args.far_height_size);
     let color_far_path = far_color_relative_path(&args.far_color_size);
-    let water_manifest = water_source.as_ref().map(|water| WaterManifest {
-        source_width: water.size.width as u32,
-        source_height: water.size.height as u32,
-        tile_size_x: (water.size.width / tile_count_x) as u32,
-        tile_size_y: (water.size.height / tile_count_y) as u32,
+    let water_manifest = WaterManifest {
+        source_width: water_source.size.width as u32,
+        source_height: water_source.size.height as u32,
+        tile_size_x: (water_source.size.width / tile_count_x) as u32,
+        tile_size_y: (water_source.size.height / tile_count_y) as u32,
         mesh_format: WATER_MESH_FORMAT_WMESH1.to_owned(),
         mesh_path: WATER_MESH_DIR.to_owned(),
         flow_format: WATER_FLOW_FORMAT_RG8.to_owned(),
         flow_path: WATER_FLOW_DIR.to_owned(),
-        ocean_raw_height: water.ocean_raw_height as u32,
-        ocean_height: water_height_to_world(water.ocean_raw_height, args.height_scale),
-    });
+        ocean_raw_height: water_source.ocean_raw_height as u32,
+        ocean_height: water_height_to_world(water_source.ocean_raw_height, args.height_scale),
+    };
     let manifest = WorldmapManifest {
         name: args
             .name
@@ -303,9 +303,13 @@ fn build_worldmap(args: &Args) -> Result<WorldmapManifest, Box<dyn Error>> {
     let far_color = box_downsample_rgba(color.as_raw(), &args.height_size, &args.far_color_size);
     write_output(args.output.join(&manifest.color_far_path), &far_color)?;
 
-    if let Some(water) = &water_source {
-        write_water_tiles(&height_bytes, &args.height_size, water, args, &manifest)?;
-    }
+    write_water_tiles(
+        &height_bytes,
+        &args.height_size,
+        &water_source,
+        args,
+        &manifest,
+    )?;
 
     manifest.write_to(args.output.join(MANIFEST_FILE_NAME))?;
 
@@ -346,10 +350,6 @@ fn validate_args(args: &Args) -> Result<(), Box<dyn Error>> {
     {
         return Err("source color size must be evenly divisible by far color size".into());
     }
-    if args.water_height_input.is_some() != args.water_flow_input.is_some() {
-        return Err("--water-height-input and --water-flow-input must be provided together".into());
-    }
-
     Ok(())
 }
 
@@ -377,14 +377,9 @@ fn load_water_source(
     args: &Args,
     tile_count_x: usize,
     tile_count_y: usize,
-) -> Result<Option<WaterSource>, Box<dyn Error>> {
-    let Some(height_path) = args.water_height_input.as_ref() else {
-        return Ok(None);
-    };
-    let flow_path = args
-        .water_flow_input
-        .as_ref()
-        .expect("water flow input should be present when water height input is present");
+) -> Result<WaterSource, Box<dyn Error>> {
+    let height_path = &args.water_height_input;
+    let flow_path = &args.water_flow_input;
     let (height, size) = read_water_height_png(height_path)?;
     let (flow_rgb, flow_size) = read_water_flow_png(flow_path)?;
 
@@ -406,13 +401,13 @@ fn load_water_source(
     let ocean_raw_height = detect_ocean_raw_height(&height, &size)?;
     let ocean_tolerance_raw = ocean_tolerance_raw(args.height_scale);
 
-    Ok(Some(WaterSource {
+    Ok(WaterSource {
         height,
         flow_rgb,
         size,
         ocean_raw_height,
         ocean_tolerance_raw,
-    }))
+    })
 }
 
 fn read_water_height_png(path: &Path) -> Result<(Vec<u16>, Size), Box<dyn Error>> {
@@ -1028,7 +1023,7 @@ fn usage() -> &'static str {
         --height-input <source.r16> --height-size <WIDTHxHEIGHT> \\
         --color-input <source.png> --output <assets/worldmaps/name> \\
         --far-height-size <WIDTHxHEIGHT> --far-color-size <WIDTHxHEIGHT> \\
-        [--water-height-input <water.png> --water-flow-input <flow.png>] \\
+        --water-height-input <water.png> --water-flow-input <flow.png> \\
         [--tile-size 1024] [--tile-padding 2] \\
         [--horizontal-scale 0.5] [--height-scale 535.5] [--name <name>]"
 }
@@ -1090,6 +1085,10 @@ mod tests {
             "16384x16384",
             "--color-input",
             "color.png",
+            "--water-height-input",
+            "water.png",
+            "--water-flow-input",
+            "flow.png",
             "--output",
             "assets/worldmaps/continent",
             "--far-height-size",
@@ -1103,40 +1102,31 @@ mod tests {
         assert_eq!(args.tile_padding, DEFAULT_TILE_PADDING);
         assert_eq!(args.horizontal_scale, DEFAULT_HORIZONTAL_SCALE);
         assert_eq!(args.height_scale, DEFAULT_HEIGHT_SCALE);
-        assert!(args.water_height_input.is_none());
-        assert!(args.water_flow_input.is_none());
+        assert_eq!(args.water_height_input, PathBuf::from("water.png"));
+        assert_eq!(args.water_flow_input, PathBuf::from("flow.png"));
     }
 
     #[test]
-    fn rejects_single_water_input() {
-        let args = Args {
-            height_input: PathBuf::from("height.r16"),
-            height_size: Size {
-                width: 4,
-                height: 4,
-            },
-            color_input: PathBuf::from("color.png"),
-            water_height_input: Some(PathBuf::from("water.png")),
-            water_flow_input: None,
-            output: PathBuf::from("world"),
-            tile_size: 2,
-            tile_padding: 1,
-            far_height_size: Size {
-                width: 2,
-                height: 2,
-            },
-            far_color_size: Size {
-                width: 2,
-                height: 2,
-            },
-            horizontal_scale: 0.5,
-            height_scale: 10.0,
-            name: None,
-        };
+    fn rejects_missing_water_flow_input() {
+        let error = parse_args(os_args(&[
+            "--height-input",
+            "height.r16",
+            "--height-size",
+            "4x4",
+            "--color-input",
+            "color.png",
+            "--water-height-input",
+            "water.png",
+            "--output",
+            "world",
+            "--far-height-size",
+            "2x2",
+            "--far-color-size",
+            "2x2",
+        ]))
+        .unwrap_err();
 
-        let error = validate_args(&args).unwrap_err();
-
-        assert!(error.to_string().contains("provided together"));
+        assert!(error.to_string().contains("--water-flow-input is required"));
     }
 
     #[test]
@@ -1179,6 +1169,8 @@ mod tests {
         let dir = unique_temp_dir("build_worldmap");
         let height_path = dir.join("source.r16");
         let color_path = dir.join("source.png");
+        let water_height_path = dir.join("water.png");
+        let flow_path = dir.join("flow.png");
         let output = dir.join("world");
         fs::create_dir_all(&dir).unwrap();
 
@@ -1204,6 +1196,11 @@ mod tests {
         )
         .unwrap();
         color.save(&color_path).unwrap();
+        write_luma16_png(&water_height_path, 4, 4, vec![100; 4 * 4]);
+        RgbImage::from_raw(4, 4, vec![127; 4 * 4 * RGB_BYTES_PER_PIXEL])
+            .unwrap()
+            .save(&flow_path)
+            .unwrap();
 
         let args = Args {
             height_input: height_path,
@@ -1212,8 +1209,8 @@ mod tests {
                 height: 4,
             },
             color_input: color_path,
-            water_height_input: None,
-            water_flow_input: None,
+            water_height_input: water_height_path,
+            water_flow_input: flow_path,
             output: output.clone(),
             tile_size: 2,
             tile_padding: 1,
@@ -1242,6 +1239,8 @@ mod tests {
         assert_eq!(parsed, manifest);
         assert_eq!(manifest.tile_count_x, 2);
         assert_eq!(manifest.tile_count_y, 2);
+        assert_eq!(manifest.water.source_width, 4);
+        assert_eq!(manifest.water.source_height, 4);
         assert_eq!(far_heights, vec![6, 8, 14, 16]);
         assert_eq!(far_color.len(), 2 * 2 * RGBA_BYTES_PER_PIXEL);
         assert_eq!(
@@ -1255,6 +1254,18 @@ mod tests {
                 .unwrap()
                 .len(),
             4 * 4 * RGBA_BYTES_PER_PIXEL as u64
+        );
+        assert_eq!(
+            fs::metadata(output.join("water/mesh/tile_0000_0000.wmesh"))
+                .unwrap()
+                .len(),
+            (WATER_MESH_MAGIC.len() + 8) as u64
+        );
+        assert_eq!(
+            fs::metadata(output.join("water/flow/tile_0001_0001.rg8"))
+                .unwrap()
+                .len(),
+            2 * 2 * RG_BYTES_PER_PIXEL as u64
         );
 
         let _ = fs::remove_dir_all(dir);
@@ -1307,8 +1318,8 @@ mod tests {
                 height: 4,
             },
             color_input: color_path,
-            water_height_input: Some(water_height_path),
-            water_flow_input: Some(flow_path),
+            water_height_input: water_height_path,
+            water_flow_input: flow_path,
             output: output.clone(),
             tile_size: 2,
             tile_padding: 1,
@@ -1327,7 +1338,7 @@ mod tests {
 
         let manifest = build_worldmap(&args).unwrap();
         let parsed = WorldmapManifest::load(output.join(MANIFEST_FILE_NAME)).unwrap();
-        let water = parsed.water.as_ref().unwrap();
+        let water = &parsed.water;
         let mesh_bytes = fs::read(output.join("water/mesh/tile_0000_0000.wmesh")).unwrap();
         let flow_bytes = fs::read(output.join("water/flow/tile_0000_0000.rg8")).unwrap();
         let (vertex_count, index_count) = water_mesh_counts(&mesh_bytes);

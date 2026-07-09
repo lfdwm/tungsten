@@ -40,25 +40,18 @@ struct WaterMeshCpu {
 }
 
 impl WaterMaps {
-    pub(crate) fn load(
-        gpu: &Device,
-        manifest: &WorldmapManifest,
-    ) -> Result<Option<Self>, Box<dyn Error>> {
-        let Some(water) = manifest.water.as_ref() else {
-            return Ok(None);
-        };
-
-        let ocean_cpu = WaterMeshCpu::ocean_plane(manifest, water.ocean_height);
+    pub(crate) fn load(gpu: &Device, manifest: &WorldmapManifest) -> Result<Self, Box<dyn Error>> {
+        let ocean_cpu = WaterMeshCpu::ocean_plane(manifest, manifest.water.ocean_height);
         let copy_commands = gpu.acquire_command_buffer()?;
         let copy_pass = gpu.begin_copy_pass(&copy_commands)?;
         let ocean = WaterMeshGpu::upload(gpu, &copy_pass, &ocean_cpu)?;
         gpu.end_copy_pass(copy_pass);
         copy_commands.submit()?;
 
-        Ok(Some(Self {
+        Ok(Self {
             ocean,
             tiles: Vec::new(),
-        }))
+        })
     }
 
     pub(crate) fn update_tile_cache(
@@ -96,9 +89,7 @@ impl WaterMaps {
         let copy_commands = gpu.acquire_command_buffer()?;
         let copy_pass = gpu.begin_copy_pass(&copy_commands)?;
         for [tile_x, tile_y] in missing_tiles {
-            let path = manifest
-                .water_mesh_tile_path(worldmap_dir, tile_x, tile_y)
-                .ok_or("water mesh tile requested for worldmap without water")?;
+            let path = manifest.water_mesh_tile_path(worldmap_dir, tile_x, tile_y);
             let cpu_mesh = WaterMeshCpu::load(&path)?;
             let mesh = if cpu_mesh.indices.is_empty() {
                 None

@@ -29,7 +29,7 @@ assets/worldmaps/<world-name>/
       ...
     far/
       overview_4096.rgba
-  water/                  # only when water inputs are provided
+  water/
     mesh/
       tile_0000_0000.wmesh
       tile_0001_0000.wmesh
@@ -82,7 +82,7 @@ water_ocean_height = 203.939
 
 `horizontal_scale` converts source pixels to world-space X/Z units. `height_scale` converts normalized R16 samples to world-space height. These are world properties, not renderer config values.
 
-The `water_*` keys are optional and are omitted for terrain-only packages. Water source dimensions may differ from terrain source dimensions, but they must cover the same world extents and divide evenly by the terrain tile counts.
+The `water_*` keys are required. Water source dimensions may differ from terrain source dimensions, but they must cover the same world extents and divide evenly by the terrain tile counts.
 
 ## Tile Format
 
@@ -137,7 +137,7 @@ cargo run --release --bin build_worldmap -- \
   --name continent
 ```
 
-The tool loads the full source height and decoded source color map into memory, then writes generated outputs one tile or overview map at a time. When water inputs are provided, it detects ocean height from non-zero border water pixels, excludes ocean-level water from mesh tiles, writes a full-map ocean height into the manifest, and emits skirted mesh tiles for non-ocean water.
+The tool loads the full source height and decoded source color map into memory, then writes generated outputs one tile or overview map at a time. It detects ocean height from non-zero border water pixels, excludes ocean-level water from mesh tiles, writes a full-map ocean height into the manifest, and emits skirted mesh tiles for non-ocean water.
 
 ## Runtime Config
 

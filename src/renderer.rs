@@ -268,70 +268,69 @@ impl Renderer {
         render_pass.draw_primitives(3, 1, 0, 0);
         gpu.end_render_pass(render_pass);
 
-        if let Some(water) = terrain_maps.water.as_ref() {
-            let color_targets = [
-                ColorTargetInfo::default()
-                    .with_texture(&render_target.color_texture)
-                    .with_load_op(LoadOp::LOAD)
-                    .with_store_op(StoreOp::STORE),
-                ColorTargetInfo::default()
-                    .with_texture(&render_target.scene_depth_texture)
-                    .with_load_op(LoadOp::LOAD)
-                    .with_store_op(StoreOp::STORE),
-            ];
-            let depth_target = DepthStencilTargetInfo::new()
-                .with_texture(&mut render_target.cube_depth_texture)
-                .with_cycle(true)
-                .with_clear_depth(1.0)
-                .with_load_op(LoadOp::CLEAR)
-                .with_store_op(StoreOp::STORE);
-            let water_params = water_params(camera, render_target.width, render_target.height);
-            let water_pass =
-                gpu.begin_render_pass(&command_buffer, &color_targets, Some(&depth_target))?;
-            water_pass.bind_graphics_pipeline(&self.water_pipeline);
-            water_pass.bind_fragment_samplers(
-                0,
-                &[TextureSamplerBinding::new()
-                    .with_texture(&render_target.terrain_depth_texture)
-                    .with_sampler(&self.upscale_sampler)],
-            );
-            command_buffer.push_vertex_uniform_data(0, &water_params);
-            command_buffer.push_fragment_uniform_data(0, &water_params);
+        let water = &terrain_maps.water;
+        let color_targets = [
+            ColorTargetInfo::default()
+                .with_texture(&render_target.color_texture)
+                .with_load_op(LoadOp::LOAD)
+                .with_store_op(StoreOp::STORE),
+            ColorTargetInfo::default()
+                .with_texture(&render_target.scene_depth_texture)
+                .with_load_op(LoadOp::LOAD)
+                .with_store_op(StoreOp::STORE),
+        ];
+        let depth_target = DepthStencilTargetInfo::new()
+            .with_texture(&mut render_target.cube_depth_texture)
+            .with_cycle(true)
+            .with_clear_depth(1.0)
+            .with_load_op(LoadOp::CLEAR)
+            .with_store_op(StoreOp::STORE);
+        let water_params = water_params(camera, render_target.width, render_target.height);
+        let water_pass =
+            gpu.begin_render_pass(&command_buffer, &color_targets, Some(&depth_target))?;
+        water_pass.bind_graphics_pipeline(&self.water_pipeline);
+        water_pass.bind_fragment_samplers(
+            0,
+            &[TextureSamplerBinding::new()
+                .with_texture(&render_target.terrain_depth_texture)
+                .with_sampler(&self.upscale_sampler)],
+        );
+        command_buffer.push_vertex_uniform_data(0, &water_params);
+        command_buffer.push_fragment_uniform_data(0, &water_params);
 
+        water_pass.bind_vertex_buffers(
+            0,
+            &[BufferBinding::new()
+                .with_buffer(&water.ocean.vertex_buffer)
+                .with_offset(0)],
+        );
+        water_pass.bind_index_buffer(
+            &BufferBinding::new()
+                .with_buffer(&water.ocean.index_buffer)
+                .with_offset(0),
+            IndexElementSize::_32BIT,
+        );
+        water_pass.draw_indexed_primitives(water.ocean.index_count, 1, 0, 0, 0);
+
+        for tile in &water.tiles {
+            let Some(mesh) = tile.mesh.as_ref() else {
+                continue;
+            };
             water_pass.bind_vertex_buffers(
                 0,
                 &[BufferBinding::new()
-                    .with_buffer(&water.ocean.vertex_buffer)
+                    .with_buffer(&mesh.vertex_buffer)
                     .with_offset(0)],
             );
             water_pass.bind_index_buffer(
                 &BufferBinding::new()
-                    .with_buffer(&water.ocean.index_buffer)
+                    .with_buffer(&mesh.index_buffer)
                     .with_offset(0),
                 IndexElementSize::_32BIT,
             );
-            water_pass.draw_indexed_primitives(water.ocean.index_count, 1, 0, 0, 0);
-
-            for tile in &water.tiles {
-                let Some(mesh) = tile.mesh.as_ref() else {
-                    continue;
-                };
-                water_pass.bind_vertex_buffers(
-                    0,
-                    &[BufferBinding::new()
-                        .with_buffer(&mesh.vertex_buffer)
-                        .with_offset(0)],
-                );
-                water_pass.bind_index_buffer(
-                    &BufferBinding::new()
-                        .with_buffer(&mesh.index_buffer)
-                        .with_offset(0),
-                    IndexElementSize::_32BIT,
-                );
-                water_pass.draw_indexed_primitives(mesh.index_count, 1, 0, 0, 0);
-            }
-            gpu.end_render_pass(water_pass);
+            water_pass.draw_indexed_primitives(mesh.index_count, 1, 0, 0, 0);
         }
+        gpu.end_render_pass(water_pass);
 
         let raster_draw = if config.raster_model_enabled {
             self.raster_model.as_ref().map(|model| {

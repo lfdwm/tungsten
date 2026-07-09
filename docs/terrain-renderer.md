@@ -45,7 +45,7 @@ flowchart TD
     Upscale --> Swapchain[Window swapchain]
 ```
 
-The app renders the terrain into offscreen color, terrain-only normalized linear depth, and scene normalized linear depth targets whose size is controlled by `performance_render_scale`. If the worldmap has water data, the water pass draws a map-wide ocean plane and streamed non-ocean water mesh tiles against terrain depth, writing updated color and scene depth. The optional raster model pass then runs before upscale, samples terrain depth for visibility, and writes raster color plus updated scene depth. The color result is then nearest-neighbor upscaled to the swapchain. The scene depth target is sampled by the upscale pass for the depth debug view and is available for later passes. The upscale pass also draws the FPS and frame-time overlay.
+The app renders the terrain into offscreen color, terrain-only normalized linear depth, and scene normalized linear depth targets whose size is controlled by `performance_render_scale`. The water pass then draws a map-wide ocean plane and streamed non-ocean water mesh tiles against terrain depth, writing updated color and scene depth. The optional raster model pass then runs before upscale, samples terrain depth for visibility, and writes raster color plus updated scene depth. The color result is then nearest-neighbor upscaled to the swapchain. The scene depth target is sampled by the upscale pass for the depth debug view and is available for later passes. The upscale pass also draws the FPS and frame-time overlay.
 
 ## Terrain Assets
 
@@ -334,7 +334,7 @@ Fog mixes terrain color toward sky based on horizontal hit distance and `camera.
 
 ## Water Pass
 
-When the selected worldmap contains water metadata, startup creates an ocean plane spanning the full terrain bounds at the manifest ocean height. Moving across terrain tile boundaries loads matching `wmesh1` non-ocean water tiles. The water pass runs after terrain and before the OBJ/cube raster pass, samples terrain-only depth, discards water behind terrain, and writes water color plus updated scene depth.
+At startup, the renderer creates an ocean plane spanning the full terrain bounds at the manifest ocean height. Moving across terrain tile boundaries loads matching `wmesh1` non-ocean water tiles. The water pass runs after terrain and before the OBJ/cube raster pass, samples terrain-only depth, discards water behind terrain, and writes water color plus updated scene depth.
 
 Generated mesh tiles include vertical skirts on exposed water boundaries to hide gaps against terrain. Flow RG8 tiles are generated with the worldmap but are not used by the current simple water shader.
 
@@ -460,7 +460,7 @@ The repo includes helper binaries for derived assets:
 
 | Tool | Purpose |
 | --- | --- |
-| `build_worldmap` | Generate tiled worldmap packages from source height/color maps and optional water maps. |
+| `build_worldmap` | Generate tiled worldmap packages from source height, color, water height, and flow maps. |
 | `max_height_mip` | Generate conservative max-height R16 mips for far terrain. |
 | `upsample_heightmap` | Generate bilinear interpolated R16 height maps. |
 | `upsample_colormap` | Generate Bayer 4x4 dithered PNG color maps without color interpolation. |

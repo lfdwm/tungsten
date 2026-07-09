@@ -38,7 +38,7 @@ pub(crate) struct TerrainMaps {
     pub(crate) height_scale: f32,
     pub(crate) manifest: WorldmapManifest,
     pub(crate) worldmap_dir: PathBuf,
-    pub(crate) water: Option<WaterMaps>,
+    pub(crate) water: WaterMaps,
     tile_cache: TerrainTileCache,
 }
 
@@ -76,15 +76,13 @@ impl TerrainMaps {
                 .invalidate_tiles_outside(window_min, window_max);
             self.current_window_min = window_min;
             self.current_window_max = window_max;
-            if let Some(water) = self.water.as_mut() {
-                water.update_tile_cache(
-                    gpu,
-                    &self.manifest,
-                    &self.worldmap_dir,
-                    window_min,
-                    window_max,
-                )?;
-            }
+            self.water.update_tile_cache(
+                gpu,
+                &self.manifest,
+                &self.worldmap_dir,
+                window_min,
+                window_max,
+            )?;
         }
 
         let missing_tiles =
@@ -441,6 +439,10 @@ pub(crate) fn load_terrain_maps(
     let tile_cache = TerrainTileCache {
         collision_height: HeightField::new(&manifest, tile_cache_width)?,
     };
+
+    gpu.end_copy_pass(copy_pass);
+    copy_commands.submit()?;
+
     let water = WaterMaps::load(gpu, &manifest)?;
 
     let mut terrain_maps = TerrainMaps {
@@ -468,8 +470,6 @@ pub(crate) fn load_terrain_maps(
         tile_cache,
     };
 
-    gpu.end_copy_pass(copy_pass);
-    copy_commands.submit()?;
     terrain_maps.update_tile_window_for_position(gpu, config.start_x, config.start_y)?;
 
     Ok(terrain_maps)
@@ -712,7 +712,18 @@ mod tests {
             color_far_path: "color/far/overview_1.rgba".to_owned(),
             color_far_width: 1,
             color_far_height: 1,
-            water: None,
+            water: tungsten::worldmap::WaterManifest {
+                source_width: 2,
+                source_height: 2,
+                tile_size_x: 2,
+                tile_size_y: 2,
+                mesh_format: "wmesh1".to_owned(),
+                mesh_path: "water/mesh".to_owned(),
+                flow_format: "rg8".to_owned(),
+                flow_path: "water/flow".to_owned(),
+                ocean_raw_height: 1,
+                ocean_height: 1.0,
+            },
         };
         let bytes = [
             0_u16.to_le_bytes(),
