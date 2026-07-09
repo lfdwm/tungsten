@@ -1,9 +1,14 @@
 # TODO
 
-- Figure out character height + speed and if we need a SUPER-scaled height/colormap
-- Code structure, break stuff out into:
-  - util methods
-  - config
-  - terrain rendering
-- Depthmap
-- Regular rasterization integrated via depthmap
+## Refactor right now:
+- Use serde + toml instead of custom toml parsing
+- Beak out GPU upload into module
+- Use glam for vector math
+
+## Future:
+- Refactor renderer to more cleanly work with more abstracted render passes
+  / render graph.
+- Break out common logic in glsl shaders to common `#import`:ed files.
+- Camera is a mess of recording, player physics, controls, etc.
+  Break out when we start implementing player logic properly.
+- Clean up asset tools when they are closer to complete.
