@@ -1,5 +1,6 @@
 mod camera;
 mod config;
+mod gpu_upload;
 mod raster_model;
 mod renderer;
 mod terrain;

@@ -1,7 +1,6 @@
 # TODO
 
 ## Refactor right now:
-- Beak out GPU upload into module
 - Use glam for vector math
 
 ## Future:

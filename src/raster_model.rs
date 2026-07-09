@@ -8,10 +8,11 @@ use std::{
 };
 
 use sdl3::gpu::{
-    Buffer, BufferRegion, BufferUsageFlags, CopyPass, Device, Filter, Sampler, SamplerAddressMode,
-    SamplerCreateInfo, SamplerMipmapMode, Texture, TextureCreateInfo, TextureFormat, TextureRegion,
-    TextureTransferInfo, TextureType, TextureUsage, TransferBufferLocation, TransferBufferUsage,
+    Buffer, BufferUsageFlags, CopyPass, Device, Filter, Sampler, SamplerAddressMode,
+    SamplerCreateInfo, SamplerMipmapMode, Texture, TextureFormat, TextureUsage,
 };
+
+use crate::gpu_upload::{create_buffer_with_data, create_texture_2d_with_pixels};
 
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 
@@ -334,10 +335,20 @@ impl RasterMeshGpu {
         copy_pass: &CopyPass,
         cpu: &RasterMeshCpu,
     ) -> Result<Self, Box<dyn Error>> {
-        let vertex_buffer =
-            create_buffer_with_data(gpu, copy_pass, BufferUsageFlags::VERTEX, &cpu.vertices)?;
-        let index_buffer =
-            create_buffer_with_data(gpu, copy_pass, BufferUsageFlags::INDEX, &cpu.indices)?;
+        let vertex_buffer = create_buffer_with_data(
+            gpu,
+            copy_pass,
+            BufferUsageFlags::VERTEX,
+            &cpu.vertices,
+            "raster model vertex",
+        )?;
+        let index_buffer = create_buffer_with_data(
+            gpu,
+            copy_pass,
+            BufferUsageFlags::INDEX,
+            &cpu.indices,
+            "raster model index",
+        )?;
         let index_count =
             u32::try_from(cpu.indices.len()).map_err(|_| "raster model index count exceeds u32")?;
 
@@ -486,88 +497,16 @@ fn create_texture_from_rgba_pixels(
         )
         .into());
     }
-    let size_bytes = u32::try_from(pixels.len())
-        .map_err(|_| "texture upload is too large for SDL transfer buffer size")?;
-
-    let texture = gpu.create_texture(
-        TextureCreateInfo::new()
-            .with_format(TextureFormat::R8g8b8a8Unorm)
-            .with_type(TextureType::_2D)
-            .with_width(width)
-            .with_height(height)
-            .with_layer_count_or_depth(1)
-            .with_num_levels(1)
-            .with_usage(TextureUsage::SAMPLER),
-    )?;
-
-    let transfer_buffer = gpu
-        .create_transfer_buffer()
-        .with_size(size_bytes)
-        .with_usage(TransferBufferUsage::UPLOAD)
-        .build()?;
-
-    let mut map = transfer_buffer.map::<u8>(gpu, false);
-    map.mem_mut().copy_from_slice(pixels);
-    map.unmap();
-
-    copy_pass.upload_to_gpu_texture(
-        TextureTransferInfo::new()
-            .with_transfer_buffer(&transfer_buffer)
-            .with_offset(0)
-            .with_pixels_per_row(width)
-            .with_rows_per_layer(height),
-        TextureRegion::new()
-            .with_texture(&texture)
-            .with_layer(0)
-            .with_width(width)
-            .with_height(height)
-            .with_depth(1),
-        false,
-    );
-
-    Ok(texture)
-}
-
-fn create_buffer_with_data<T: Copy>(
-    gpu: &Device,
-    copy_pass: &CopyPass,
-    usage: BufferUsageFlags,
-    data: &[T],
-) -> Result<Buffer, Box<dyn Error>> {
-    if data.is_empty() {
-        return Err("cannot create an empty raster model GPU buffer".into());
-    }
-
-    let len_bytes = std::mem::size_of_val(data);
-    let len_bytes = u32::try_from(len_bytes)
-        .map_err(|_| "raster model buffer is too large for SDL buffer size")?;
-    let buffer = gpu
-        .create_buffer()
-        .with_size(len_bytes)
-        .with_usage(usage)
-        .build()?;
-    let transfer_buffer = gpu
-        .create_transfer_buffer()
-        .with_size(len_bytes)
-        .with_usage(TransferBufferUsage::UPLOAD)
-        .build()?;
-
-    let mut map = transfer_buffer.map::<T>(gpu, false);
-    map.mem_mut().copy_from_slice(data);
-    map.unmap();
-
-    copy_pass.upload_to_gpu_buffer(
-        TransferBufferLocation::new()
-            .with_offset(0)
-            .with_transfer_buffer(&transfer_buffer),
-        BufferRegion::new()
-            .with_offset(0)
-            .with_size(len_bytes)
-            .with_buffer(&buffer),
-        false,
-    );
-
-    Ok(buffer)
+    create_texture_2d_with_pixels(
+        gpu,
+        copy_pass,
+        width,
+        height,
+        TextureFormat::R8g8b8a8Unorm,
+        TextureUsage::SAMPLER,
+        pixels,
+        "texture",
+    )
 }
 
 fn unknown_texture_value<'a>(material: &'a tobj::Material, keys: &[&str]) -> Option<&'a str> {

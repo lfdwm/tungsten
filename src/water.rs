@@ -1,10 +1,9 @@
 use std::{error::Error, fs, mem::size_of, path::Path};
 
-use sdl3::gpu::{
-    Buffer, BufferRegion, BufferUsageFlags, CopyPass, Device, TransferBufferLocation,
-    TransferBufferUsage,
-};
+use sdl3::gpu::{Buffer, BufferUsageFlags, CopyPass, Device};
 use tungsten::worldmap::WorldmapManifest;
+
+use crate::gpu_upload::create_buffer_with_data;
 
 const WATER_MESH_MAGIC: &[u8; 8] = b"TWMESH1\0";
 
@@ -152,10 +151,20 @@ impl WaterMeshGpu {
         copy_pass: &CopyPass,
         cpu: &WaterMeshCpu,
     ) -> Result<Self, Box<dyn Error>> {
-        let vertex_buffer =
-            create_buffer_with_data(gpu, copy_pass, BufferUsageFlags::VERTEX, &cpu.vertices)?;
-        let index_buffer =
-            create_buffer_with_data(gpu, copy_pass, BufferUsageFlags::INDEX, &cpu.indices)?;
+        let vertex_buffer = create_buffer_with_data(
+            gpu,
+            copy_pass,
+            BufferUsageFlags::VERTEX,
+            &cpu.vertices,
+            "water mesh vertex",
+        )?;
+        let index_buffer = create_buffer_with_data(
+            gpu,
+            copy_pass,
+            BufferUsageFlags::INDEX,
+            &cpu.indices,
+            "water mesh index",
+        )?;
         let index_count =
             u32::try_from(cpu.indices.len()).map_err(|_| "water mesh index count exceeds u32")?;
 
@@ -249,48 +258,6 @@ fn read_u32(bytes: &[u8], cursor: &mut usize) -> u32 {
     ]);
     *cursor += 4;
     value
-}
-
-fn create_buffer_with_data<T: Copy>(
-    gpu: &Device,
-    copy_pass: &CopyPass,
-    usage: BufferUsageFlags,
-    data: &[T],
-) -> Result<Buffer, Box<dyn Error>> {
-    if data.is_empty() {
-        return Err("cannot create an empty water mesh GPU buffer".into());
-    }
-
-    let len_bytes = std::mem::size_of_val(data);
-    let len_bytes = u32::try_from(len_bytes)
-        .map_err(|_| "water mesh buffer is too large for SDL buffer size")?;
-    let buffer = gpu
-        .create_buffer()
-        .with_size(len_bytes)
-        .with_usage(usage)
-        .build()?;
-    let transfer_buffer = gpu
-        .create_transfer_buffer()
-        .with_size(len_bytes)
-        .with_usage(TransferBufferUsage::UPLOAD)
-        .build()?;
-
-    let mut map = transfer_buffer.map::<T>(gpu, false);
-    map.mem_mut().copy_from_slice(data);
-    map.unmap();
-
-    copy_pass.upload_to_gpu_buffer(
-        TransferBufferLocation::new()
-            .with_offset(0)
-            .with_transfer_buffer(&transfer_buffer),
-        BufferRegion::new()
-            .with_offset(0)
-            .with_size(len_bytes)
-            .with_buffer(&buffer),
-        false,
-    );
-
-    Ok(buffer)
 }
 
 #[cfg(test)]

@@ -6,12 +6,17 @@ use std::{
 
 use sdl3::gpu::{
     Device, Filter, Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode, Texture,
-    TextureCreateInfo, TextureFormat, TextureRegion, TextureTransferInfo, TextureType,
-    TextureUsage, TransferBufferUsage,
+    TextureFormat, TextureUsage,
 };
 use tungsten::worldmap::{WorldmapManifest, manifest_dir};
 
-use crate::{config::AppConfig, water::WaterMaps};
+use crate::{
+    config::AppConfig,
+    gpu_upload::{
+        create_texture_2d, create_texture_2d_with_pixels, upload_bytes_to_texture_region,
+    },
+    water::WaterMaps,
+};
 
 const MAX_SHADER_TILE_SLOTS: usize = 25;
 const R16_BYTES_PER_PIXEL: usize = 2;
@@ -139,6 +144,7 @@ impl TerrainMaps {
             self.tile_padding,
             R16_BYTES_PER_PIXEL,
             &height_bytes,
+            "height tile",
         )?;
         upload_padded_tile_payload(
             gpu,
@@ -151,6 +157,7 @@ impl TerrainMaps {
             self.tile_padding,
             RGBA_BYTES_PER_PIXEL,
             &color_bytes,
+            "color tile",
         )?;
         self.tile_cache
             .collision_height
@@ -384,14 +391,14 @@ pub(crate) fn load_terrain_maps(
     let copy_commands = gpu.acquire_command_buffer()?;
     let copy_pass = gpu.begin_copy_pass(&copy_commands)?;
 
-    let color_near = create_empty_texture(
+    let color_near = create_texture_2d(
         gpu,
         atlas_size,
         atlas_size,
         TextureFormat::R8g8b8a8Unorm,
         TextureUsage::SAMPLER,
     )?;
-    let height_near_atlas = create_empty_texture(
+    let height_near_atlas = create_texture_2d(
         gpu,
         atlas_size,
         atlas_size,
@@ -410,13 +417,15 @@ pub(crate) fn load_terrain_maps(
         manifest.color_far_width,
         manifest.color_far_height,
     )?;
-    let color_far = create_texture_from_bytes(
+    let color_far = create_texture_2d_with_pixels(
         gpu,
         &copy_pass,
         manifest.color_far_width,
         manifest.color_far_height,
         TextureFormat::R8g8b8a8Unorm,
+        TextureUsage::SAMPLER,
         &color_far_pixels,
+        "far color texture",
     )?;
     let color_sampler = gpu.create_sampler(
         SamplerCreateInfo::new()
@@ -475,25 +484,6 @@ pub(crate) fn load_terrain_maps(
     Ok(terrain_maps)
 }
 
-fn create_empty_texture(
-    gpu: &Device,
-    width: u32,
-    height: u32,
-    format: TextureFormat,
-    usage: TextureUsage,
-) -> Result<Texture<'static>, Box<dyn Error>> {
-    Ok(gpu.create_texture(
-        TextureCreateInfo::new()
-            .with_format(format)
-            .with_type(TextureType::_2D)
-            .with_width(width)
-            .with_height(height)
-            .with_layer_count_or_depth(1)
-            .with_num_levels(1)
-            .with_usage(usage),
-    )?)
-}
-
 fn create_texture_from_r16(
     gpu: &Device,
     copy_pass: &sdl3::gpu::CopyPass,
@@ -502,13 +492,15 @@ fn create_texture_from_r16(
     height: u32,
 ) -> Result<Texture<'static>, Box<dyn Error>> {
     let pixels = read_r16_pixels(path.as_ref(), width, height)?;
-    create_texture_from_bytes(
+    create_texture_2d_with_pixels(
         gpu,
         copy_pass,
         width,
         height,
         TextureFormat::R16Unorm,
+        TextureUsage::SAMPLER,
         &pixels,
+        "far height texture",
     )
 }
 
@@ -556,55 +548,6 @@ fn read_exact_bytes(path: &Path, expected_size: usize) -> Result<Vec<u8>, Box<dy
     Ok(bytes)
 }
 
-fn create_texture_from_bytes(
-    gpu: &Device,
-    copy_pass: &sdl3::gpu::CopyPass,
-    width: u32,
-    height: u32,
-    format: TextureFormat,
-    pixels: &[u8],
-) -> Result<Texture<'static>, Box<dyn Error>> {
-    let size_bytes = pixels.len() as u32;
-
-    let texture = gpu.create_texture(
-        TextureCreateInfo::new()
-            .with_format(format)
-            .with_type(TextureType::_2D)
-            .with_width(width)
-            .with_height(height)
-            .with_layer_count_or_depth(1)
-            .with_num_levels(1)
-            .with_usage(TextureUsage::SAMPLER),
-    )?;
-
-    let transfer_buffer = gpu
-        .create_transfer_buffer()
-        .with_size(size_bytes)
-        .with_usage(TransferBufferUsage::UPLOAD)
-        .build()?;
-
-    let mut map = transfer_buffer.map::<u8>(gpu, false);
-    map.mem_mut().copy_from_slice(pixels);
-    map.unmap();
-
-    copy_pass.upload_to_gpu_texture(
-        TextureTransferInfo::new()
-            .with_transfer_buffer(&transfer_buffer)
-            .with_offset(0)
-            .with_pixels_per_row(width)
-            .with_rows_per_layer(height),
-        TextureRegion::new()
-            .with_texture(&texture)
-            .with_layer(0)
-            .with_width(width)
-            .with_height(height)
-            .with_depth(1),
-        false,
-    );
-
-    Ok(texture)
-}
-
 fn upload_padded_tile_payload(
     gpu: &Device,
     copy_pass: &sdl3::gpu::CopyPass,
@@ -616,43 +559,29 @@ fn upload_padded_tile_payload(
     tile_padding: u32,
     bytes_per_pixel: usize,
     pixels: &[u8],
+    context: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let size_bytes = u32::try_from(pixels.len())
-        .map_err(|_| "tile upload is too large for SDL transfer buffer size")?;
     let row_offset_pixels = tile_padding
         .checked_mul(stored_tile_size)
         .and_then(|offset| offset.checked_add(tile_padding))
         .ok_or("tile payload offset overflows u32")?;
     let offset = row_offset_pixels as usize * bytes_per_pixel;
     let offset = u32::try_from(offset).map_err(|_| "tile payload offset overflows u32")?;
-    let transfer_buffer = gpu
-        .create_transfer_buffer()
-        .with_size(size_bytes)
-        .with_usage(TransferBufferUsage::UPLOAD)
-        .build()?;
 
-    let mut map = transfer_buffer.map::<u8>(gpu, false);
-    map.mem_mut().copy_from_slice(pixels);
-    map.unmap();
-
-    copy_pass.upload_to_gpu_texture(
-        TextureTransferInfo::new()
-            .with_transfer_buffer(&transfer_buffer)
-            .with_offset(offset)
-            .with_pixels_per_row(stored_tile_size)
-            .with_rows_per_layer(stored_tile_size),
-        TextureRegion::new()
-            .with_texture(texture)
-            .with_layer(0)
-            .with_x(x)
-            .with_y(y)
-            .with_width(tile_size)
-            .with_height(tile_size)
-            .with_depth(1),
-        false,
-    );
-
-    Ok(())
+    upload_bytes_to_texture_region(
+        gpu,
+        copy_pass,
+        texture,
+        pixels,
+        offset,
+        stored_tile_size,
+        stored_tile_size,
+        x,
+        y,
+        tile_size,
+        tile_size,
+        context,
+    )
 }
 
 fn checked_atlas_size(tile_cache_width: u32, stored_tile_size: u32) -> Result<u32, Box<dyn Error>> {
