@@ -4,9 +4,13 @@ use std::{
     error::Error,
     ffi::OsString,
     fs,
+    mem::{offset_of, size_of},
     path::{Path, PathBuf},
 };
 
+use meshopt::{
+    SimplifyOptions, VertexDataAdapter, optimize_vertex_fetch, simplify_with_locks, typed_to_bytes,
+};
 use tungsten::worldmap::{
     COLOR_FORMAT_RGBA8, COLOR_NEAR_DIR, HEIGHT_FORMAT_R16LE, HEIGHT_NEAR_DIR, MANIFEST_FILE_NAME,
     WATER_FLOW_DIR, WATER_FLOW_FORMAT_RG8, WATER_MESH_DIR, WATER_MESH_FORMAT_WMESH1, WaterManifest,
@@ -22,6 +26,7 @@ const DEFAULT_TILE_SIZE: usize = 1024;
 const DEFAULT_TILE_PADDING: usize = 2;
 const DEFAULT_HORIZONTAL_SCALE: f32 = 0.5;
 const DEFAULT_HEIGHT_SCALE: f32 = 255.0 * 2.1;
+const DEFAULT_WATER_SIMPLIFY_ERROR: f32 = 0.0;
 const OCEAN_HEIGHT_TOLERANCE_WORLD: f32 = 0.1;
 const WATER_SKIRT_DROP: f32 = 8.0;
 const WATER_SKIRT_TERRAIN_CLEARANCE: f32 = 2.0;
@@ -47,6 +52,7 @@ struct Args {
     far_color_size: Size,
     horizontal_scale: f32,
     height_scale: f32,
+    water_simplify_error: f32,
     name: Option<String>,
 }
 
@@ -80,6 +86,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Args, Box<dyn 
     let mut far_color_size = None;
     let mut horizontal_scale = None;
     let mut height_scale = None;
+    let mut water_simplify_error = None;
     let mut name = None;
     let mut args = args.into_iter();
 
@@ -122,6 +129,12 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Args, Box<dyn 
             Some("--height-scale") => {
                 height_scale = Some(parse_f32(next_value(&mut args, "--height-scale")?)?)
             }
+            Some("--water-simplify-error") => {
+                water_simplify_error = Some(parse_non_negative_f32(next_value(
+                    &mut args,
+                    "--water-simplify-error",
+                )?)?)
+            }
             Some("--name") => {
                 name = Some(parse_string(next_value(&mut args, "--name")?, "--name")?)
             }
@@ -146,6 +159,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Args, Box<dyn 
         far_color_size: far_color_size.ok_or("--far-color-size is required")?,
         horizontal_scale: horizontal_scale.unwrap_or(DEFAULT_HORIZONTAL_SCALE),
         height_scale: height_scale.unwrap_or(DEFAULT_HEIGHT_SCALE),
+        water_simplify_error: water_simplify_error.unwrap_or(DEFAULT_WATER_SIMPLIFY_ERROR),
         name,
     })
 }
@@ -197,6 +211,19 @@ fn parse_f32(value: OsString) -> Result<f32, Box<dyn Error>> {
     let parsed = value.parse::<f32>()?;
     if !parsed.is_finite() || parsed <= 0.0 {
         return Err("scale values must be finite and greater than zero".into());
+    }
+
+    Ok(parsed)
+}
+
+fn parse_non_negative_f32(value: OsString) -> Result<f32, Box<dyn Error>> {
+    let value = value
+        .to_str()
+        .ok_or("floating point values must be valid UTF-8")?
+        .replace('_', "");
+    let parsed = value.parse::<f32>()?;
+    if !parsed.is_finite() || parsed < 0.0 {
+        return Err("water simplification error must be finite and non-negative".into());
     }
 
     Ok(parsed)
@@ -350,6 +377,9 @@ fn validate_args(args: &Args) -> Result<(), Box<dyn Error>> {
     {
         return Err("source color size must be evenly divisible by far color size".into());
     }
+    if !args.water_simplify_error.is_finite() || args.water_simplify_error < 0.0 {
+        return Err("water simplification error must be finite and non-negative".into());
+    }
     Ok(())
 }
 
@@ -361,16 +391,84 @@ struct WaterSource {
     ocean_tolerance_raw: u16,
 }
 
-#[derive(Clone, Copy)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct WaterMeshVertex {
     position: [f32; 3],
     normal: [f32; 3],
     uv: [f32; 2],
 }
 
+#[derive(Clone, Debug)]
 struct WaterMesh {
     vertices: Vec<WaterMeshVertex>,
     indices: Vec<u32>,
+}
+
+struct WaterTopMesh {
+    vertices: Vec<WaterMeshVertex>,
+    indices: Vec<u32>,
+    vertex_locks: Vec<bool>,
+    vertex_lookup: HashMap<WaterVertexKey, u32>,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct WaterVertexKey {
+    position: [u32; 3],
+}
+
+impl WaterTopMesh {
+    fn new() -> Self {
+        Self {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            vertex_locks: Vec::new(),
+            vertex_lookup: HashMap::new(),
+        }
+    }
+
+    fn add_vertex(&mut self, position: [f32; 3], locked: bool) -> u32 {
+        let key = WaterVertexKey::from_position(position);
+        if let Some(&index) = self.vertex_lookup.get(&key) {
+            if locked {
+                self.vertex_locks[index as usize] = true;
+            }
+            return index;
+        }
+
+        let index = self.vertices.len() as u32;
+        self.vertices.push(WaterMeshVertex {
+            position,
+            normal: [0.0, 1.0, 0.0],
+            uv: [position[0], position[2]],
+        });
+        self.vertex_locks.push(locked);
+        self.vertex_lookup.insert(key, index);
+        index
+    }
+
+    fn add_quad(&mut self, a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3], locks: [bool; 4]) {
+        let start = [
+            self.add_vertex(a, locks[0]),
+            self.add_vertex(b, locks[1]),
+            self.add_vertex(c, locks[2]),
+            self.add_vertex(d, locks[3]),
+        ];
+        self.indices
+            .extend_from_slice(&[start[0], start[1], start[2], start[0], start[2], start[3]]);
+    }
+}
+
+impl WaterVertexKey {
+    fn from_position(position: [f32; 3]) -> Self {
+        Self {
+            position: [
+                position[0].to_bits(),
+                position[1].to_bits(),
+                position[2].to_bits(),
+            ],
+        }
+    }
 }
 
 fn load_water_source(
@@ -509,7 +607,7 @@ fn write_water_tiles(
     for tile_y in 0..manifest.tile_count_y as usize {
         for tile_x in 0..manifest.tile_count_x as usize {
             let mesh =
-                build_water_tile_mesh(terrain_height, terrain_size, water, args, tile_x, tile_y);
+                build_water_tile_mesh(terrain_height, terrain_size, water, args, tile_x, tile_y)?;
             write_water_mesh(
                 mesh_dir.join(water_mesh_tile_file_name(
                     u32::try_from(tile_x)?,
@@ -538,14 +636,15 @@ fn build_water_tile_mesh(
     args: &Args,
     tile_x: usize,
     tile_y: usize,
-) -> WaterMesh {
+) -> Result<WaterMesh, Box<dyn Error>> {
     let water_tile_width = water.size.width / (args.height_size.width / args.tile_size);
     let water_tile_height = water.size.height / (args.height_size.height / args.tile_size);
     let start_x = tile_x * water_tile_width;
     let start_y = tile_y * water_tile_height;
     let end_x = start_x + water_tile_width;
     let end_y = start_y + water_tile_height;
-    let mut mesh = WaterMesh {
+    let mut top = WaterTopMesh::new();
+    let mut skirts = WaterMesh {
         vertices: Vec::new(),
         indices: Vec::new(),
     };
@@ -556,19 +655,47 @@ fn build_water_tile_mesh(
                 continue;
             }
 
-            add_water_cell(&mut mesh, terrain_height, terrain_size, water, args, x, y);
+            add_water_cell(
+                &mut top,
+                &mut skirts,
+                terrain_height,
+                terrain_size,
+                water,
+                args,
+                WaterTileCellBounds {
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                },
+                x,
+                y,
+            );
         }
     }
 
-    mesh
+    let mut mesh = simplify_water_top_mesh(top, args.water_simplify_error)?;
+    append_mesh(&mut mesh, skirts)?;
+
+    Ok(mesh)
+}
+
+#[derive(Clone, Copy)]
+struct WaterTileCellBounds {
+    start_x: usize,
+    start_y: usize,
+    end_x: usize,
+    end_y: usize,
 }
 
 fn add_water_cell(
-    mesh: &mut WaterMesh,
+    top: &mut WaterTopMesh,
+    skirts: &mut WaterMesh,
     terrain_height: &[u8],
     terrain_size: &Size,
     water: &WaterSource,
     args: &Args,
+    bounds: WaterTileCellBounds,
     x: usize,
     y: usize,
 ) {
@@ -580,21 +707,97 @@ fn add_water_cell(
     let p10 = water_top_position(water, args, x + 1, y, h10);
     let p11 = water_top_position(water, args, x + 1, y + 1, h11);
     let p01 = water_top_position(water, args, x, y + 1, h01);
+    let rim_left = x == 0 || !is_mesh_water_cell(water, x - 1, y);
+    let rim_right = !is_mesh_water_cell(water, x + 1, y);
+    let rim_back = y == 0 || !is_mesh_water_cell(water, x, y - 1);
+    let rim_front = !is_mesh_water_cell(water, x, y + 1);
+    let lock_left = rim_left || x == bounds.start_x;
+    let lock_right = rim_right || x + 1 == bounds.end_x;
+    let lock_back = rim_back || y == bounds.start_y;
+    let lock_front = rim_front || y + 1 == bounds.end_y;
 
-    add_quad(mesh, p00, p10, p11, p01);
+    top.add_quad(
+        p00,
+        p10,
+        p11,
+        p01,
+        [
+            lock_left || lock_back,
+            lock_right || lock_back,
+            lock_right || lock_front,
+            lock_left || lock_front,
+        ],
+    );
 
-    if x == 0 || !is_mesh_water_cell(water, x - 1, y) {
-        add_water_skirt(mesh, terrain_height, terrain_size, args, p01, p00);
+    if rim_left {
+        add_water_skirt(skirts, terrain_height, terrain_size, args, p01, p00);
     }
-    if !is_mesh_water_cell(water, x + 1, y) {
-        add_water_skirt(mesh, terrain_height, terrain_size, args, p10, p11);
+    if rim_right {
+        add_water_skirt(skirts, terrain_height, terrain_size, args, p10, p11);
     }
-    if y == 0 || !is_mesh_water_cell(water, x, y - 1) {
-        add_water_skirt(mesh, terrain_height, terrain_size, args, p00, p10);
+    if rim_back {
+        add_water_skirt(skirts, terrain_height, terrain_size, args, p00, p10);
     }
-    if !is_mesh_water_cell(water, x, y + 1) {
-        add_water_skirt(mesh, terrain_height, terrain_size, args, p11, p01);
+    if rim_front {
+        add_water_skirt(skirts, terrain_height, terrain_size, args, p11, p01);
     }
+}
+
+fn simplify_water_top_mesh(
+    top: WaterTopMesh,
+    simplify_error: f32,
+) -> Result<WaterMesh, Box<dyn Error>> {
+    if top.indices.is_empty() {
+        return Ok(WaterMesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        });
+    }
+
+    let mut indices = top.indices;
+    if simplify_error > 0.0 {
+        let vertex_data = VertexDataAdapter::new(
+            typed_to_bytes(&top.vertices),
+            size_of::<WaterMeshVertex>(),
+            offset_of!(WaterMeshVertex, position),
+        )?;
+        let simplified = simplify_with_locks(
+            &indices,
+            &vertex_data,
+            &top.vertex_locks,
+            0,
+            simplify_error,
+            SimplifyOptions::LockBorder | SimplifyOptions::ErrorAbsolute,
+            None,
+        );
+
+        if !simplified.is_empty() {
+            indices = simplified;
+        }
+    }
+
+    let vertices = optimize_vertex_fetch(&mut indices, &top.vertices);
+
+    Ok(WaterMesh { vertices, indices })
+}
+
+fn append_mesh(mesh: &mut WaterMesh, append: WaterMesh) -> Result<(), Box<dyn Error>> {
+    if append.indices.is_empty() {
+        return Ok(());
+    }
+
+    let base_index =
+        u32::try_from(mesh.vertices.len()).map_err(|_| "water mesh vertex count exceeds u32")?;
+    mesh.vertices.extend(append.vertices);
+    for index in append.indices {
+        mesh.indices.push(
+            base_index
+                .checked_add(index)
+                .ok_or("water mesh index exceeds u32")?,
+        );
+    }
+
+    Ok(())
 }
 
 fn add_water_skirt(
@@ -1025,7 +1228,8 @@ fn usage() -> &'static str {
         --far-height-size <WIDTHxHEIGHT> --far-color-size <WIDTHxHEIGHT> \\
         --water-height-input <water.png> --water-flow-input <flow.png> \\
         [--tile-size 1024] [--tile-padding 2] \\
-        [--horizontal-scale 0.5] [--height-scale 535.5] [--name <name>]"
+        [--horizontal-scale 0.5] [--height-scale 535.5] \\
+        [--water-simplify-error <WORLD_UNITS>] [--name <name>]"
 }
 
 #[cfg(test)]
@@ -1102,8 +1306,60 @@ mod tests {
         assert_eq!(args.tile_padding, DEFAULT_TILE_PADDING);
         assert_eq!(args.horizontal_scale, DEFAULT_HORIZONTAL_SCALE);
         assert_eq!(args.height_scale, DEFAULT_HEIGHT_SCALE);
+        assert_eq!(args.water_simplify_error, DEFAULT_WATER_SIMPLIFY_ERROR);
         assert_eq!(args.water_height_input, PathBuf::from("water.png"));
         assert_eq!(args.water_flow_input, PathBuf::from("flow.png"));
+    }
+
+    #[test]
+    fn parses_water_simplify_error() {
+        let args = parse_args(os_args(&[
+            "--height-input",
+            "height.r16",
+            "--height-size",
+            "4x4",
+            "--color-input",
+            "color.png",
+            "--water-height-input",
+            "water.png",
+            "--water-flow-input",
+            "flow.png",
+            "--output",
+            "world",
+            "--far-height-size",
+            "2x2",
+            "--far-color-size",
+            "2x2",
+            "--water-simplify-error",
+            "0.5",
+        ]))
+        .unwrap();
+
+        assert_eq!(args.water_simplify_error, 0.5);
+
+        let error = parse_args(os_args(&[
+            "--height-input",
+            "height.r16",
+            "--height-size",
+            "4x4",
+            "--color-input",
+            "color.png",
+            "--water-height-input",
+            "water.png",
+            "--water-flow-input",
+            "flow.png",
+            "--output",
+            "world",
+            "--far-height-size",
+            "2x2",
+            "--far-color-size",
+            "2x2",
+            "--water-simplify-error",
+            "-1.0",
+        ]))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("water simplification error"));
     }
 
     #[test]
@@ -1162,6 +1418,85 @@ mod tests {
                 9, 9, 10, 11,
             ]
         );
+    }
+
+    #[test]
+    fn simplifies_water_top_mesh_and_preserves_locked_vertices() {
+        let mut top = WaterTopMesh::new();
+        let cell_count = 4;
+
+        for y in 0..cell_count {
+            for x in 0..cell_count {
+                let p00 = [x as f32, 1.0, y as f32];
+                let p10 = [(x + 1) as f32, 1.0, y as f32];
+                let p11 = [(x + 1) as f32, 1.0, (y + 1) as f32];
+                let p01 = [x as f32, 1.0, (y + 1) as f32];
+                top.add_quad(
+                    p00,
+                    p10,
+                    p11,
+                    p01,
+                    [
+                        x == 0 || y == 0,
+                        x + 1 == cell_count || y == 0,
+                        x + 1 == cell_count || y + 1 == cell_count,
+                        x == 0 || y + 1 == cell_count,
+                    ],
+                );
+            }
+        }
+
+        let original_index_count = top.indices.len();
+        let locked_positions = top
+            .vertices
+            .iter()
+            .zip(top.vertex_locks.iter())
+            .filter_map(|(vertex, locked)| locked.then_some(vertex.position))
+            .collect::<Vec<_>>();
+        let mesh = simplify_water_top_mesh(top, 100.0).unwrap();
+
+        assert!(mesh.indices.len() < original_index_count);
+        for position in locked_positions {
+            assert!(
+                mesh.vertices
+                    .iter()
+                    .any(|vertex| vertex.position == position),
+                "locked water vertex {position:?} was removed"
+            );
+        }
+    }
+
+    #[test]
+    fn appends_skirt_mesh_without_rewriting_vertices() {
+        let mut mesh = WaterMesh {
+            vertices: vec![WaterMeshVertex {
+                position: [0.0, 1.0, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                uv: [0.0, 0.0],
+            }],
+            indices: vec![0],
+        };
+        let skirt = WaterMesh {
+            vertices: vec![
+                WaterMeshVertex {
+                    position: [1.0, 2.0, 3.0],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [1.0, 3.0],
+                },
+                WaterMeshVertex {
+                    position: [4.0, 5.0, 6.0],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [4.0, 6.0],
+                },
+            ],
+            indices: vec![0, 1, 0],
+        };
+        let expected_vertices = skirt.vertices.clone();
+
+        append_mesh(&mut mesh, skirt).unwrap();
+
+        assert_eq!(&mesh.vertices[1..], expected_vertices.as_slice());
+        assert_eq!(mesh.indices, vec![0, 1, 2, 1]);
     }
 
     #[test]
@@ -1224,6 +1559,7 @@ mod tests {
             },
             horizontal_scale: 0.5,
             height_scale: 10.0,
+            water_simplify_error: 0.0,
             name: Some("test-world".to_owned()),
         };
 
@@ -1333,6 +1669,7 @@ mod tests {
             },
             horizontal_scale: 0.5,
             height_scale: 10.0,
+            water_simplify_error: 0.0,
             name: Some("test-water".to_owned()),
         };
 

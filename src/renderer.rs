@@ -313,9 +313,7 @@ impl Renderer {
         water_pass.draw_indexed_primitives(water.ocean.index_count, 1, 0, 0, 0);
 
         for tile in &water.tiles {
-            let Some(mesh) = tile.mesh.as_ref() else {
-                continue;
-            };
+            let mesh = &tile.mesh;
             water_pass.bind_vertex_buffers(
                 0,
                 &[BufferBinding::new()

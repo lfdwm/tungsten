@@ -108,7 +108,7 @@ vertices: position.xyz normal.xyz uv.xy as little-endian f32
 indices: little-endian u32
 ```
 
-Water flow tiles are raw RG8 files copied from the source flowmap red/green channels. The renderer currently loads water mesh geometry and renders a generated map-wide ocean plane from `water_ocean_height`; flow data is packaged for later shading work.
+Water flow tiles are raw RG8 files copied from the source flowmap red/green channels. The renderer loads all non-empty water mesh tiles at startup and renders a generated map-wide ocean plane from `water_ocean_height`; flow data is packaged for later shading work and is not loaded by the current runtime.
 
 ## Far Maps
 
@@ -134,10 +134,11 @@ cargo run --release --bin build_worldmap -- \
   --far-color-size 4096x4096 \
   --horizontal-scale 0.5 \
   --height-scale 535.5 \
+  --water-simplify-error 0.5 \
   --name continent
 ```
 
-The tool loads the full source height and decoded source color map into memory, then writes generated outputs one tile or overview map at a time. It detects ocean height from non-zero border water pixels, excludes ocean-level water from mesh tiles, writes a full-map ocean height into the manifest, and emits skirted mesh tiles for non-ocean water.
+The tool loads the full source height and decoded source color map into memory, then writes generated outputs one tile or overview map at a time. It detects ocean height from non-zero border water pixels, excludes ocean-level water from mesh tiles, writes a full-map ocean height into the manifest, and emits skirted mesh tiles for non-ocean water. `--water-simplify-error` controls build-time simplification of water top surfaces in absolute world units; `0.0` disables simplification, while non-zero values preserve water rims, tile borders, and skirts.
 
 ## Runtime Config
 
@@ -149,6 +150,8 @@ tile_cache_radius = 1
 ```
 
 `tile_cache_radius = 1` creates a `3x3` resident near-tile cache. The runtime uploads only the `1024x1024` tile payloads into the near atlases; the generated `2px` padding is used when extracting tile payloads and for CPU collision data. Tiles live in ring atlas slots, so moving across a tile boundary uploads only newly visible slots while shared tiles stay resident. `tile_cache_radius = 2` is supported for a `5x5` cache with higher VRAM use and larger tile-update bursts.
+
+Water meshes are independent of `tile_cache_radius`: all non-empty non-ocean water mesh tiles are loaded at startup. Water mesh VRAM depends on the source water coverage and the `--water-simplify-error` value used when generating the package.
 
 Approximate default VRAM:
 

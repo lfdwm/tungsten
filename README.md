@@ -79,8 +79,11 @@ cargo run --release --bin build_worldmap -- \
   --far-color-size 4096x4096 \
   --horizontal-scale 0.5 \
   --height-scale 535.5 \
+  --water-simplify-error 0.5 \
   --name continent
 ```
+
+`--water-simplify-error` is optional and defaults to `0.0`, which keeps water top surfaces unsimplified. Non-zero values are absolute world-unit error limits; the generator keeps water rims, tile borders, and skirts intact so all non-empty water mesh tiles can be loaded at startup without depending on the terrain tile cache.
 
 Generate a conservative max-height R16 mip:
 

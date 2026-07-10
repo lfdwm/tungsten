@@ -81,13 +81,6 @@ impl TerrainMaps {
                 .invalidate_tiles_outside(window_min, window_max);
             self.current_window_min = window_min;
             self.current_window_max = window_max;
-            self.water.update_tile_cache(
-                gpu,
-                &self.manifest,
-                &self.worldmap_dir,
-                window_min,
-                window_max,
-            )?;
         }
 
         let missing_tiles =
@@ -452,7 +445,7 @@ pub(crate) fn load_terrain_maps(
     gpu.end_copy_pass(copy_pass);
     copy_commands.submit()?;
 
-    let water = WaterMaps::load(gpu, &manifest)?;
+    let water = WaterMaps::load(gpu, &manifest, &worldmap_dir)?;
 
     let mut terrain_maps = TerrainMaps {
         color_near,

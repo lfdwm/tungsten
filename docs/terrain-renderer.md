@@ -45,7 +45,7 @@ flowchart TD
     Upscale --> Swapchain[Window swapchain]
 ```
 
-The app renders the terrain into offscreen color, terrain-only normalized linear depth, and scene normalized linear depth targets whose size is controlled by `performance_render_scale`. The water pass then draws a map-wide ocean plane and streamed non-ocean water mesh tiles against terrain depth, writing updated color and scene depth. The optional raster model pass then runs before upscale, samples terrain depth for visibility, and writes raster color plus updated scene depth. The color result is then nearest-neighbor upscaled to the swapchain. The scene depth target is sampled by the upscale pass for the depth debug view and is available for later passes. The upscale pass also draws the FPS and frame-time overlay.
+The app renders the terrain into offscreen color, terrain-only normalized linear depth, and scene normalized linear depth targets whose size is controlled by `performance_render_scale`. The water pass then draws a map-wide ocean plane and all-resident non-ocean water mesh tiles against terrain depth, writing updated color and scene depth. The optional raster model pass then runs before upscale, samples terrain depth for visibility, and writes raster color plus updated scene depth. The color result is then nearest-neighbor upscaled to the swapchain. The scene depth target is sampled by the upscale pass for the depth debug view and is available for later passes. The upscale pass also draws the FPS and frame-time overlay.
 
 ## Terrain Assets
 
@@ -63,12 +63,12 @@ The package format is documented in [worldmaps.md](worldmaps.md). Runtime terrai
 | Near color tiles | Padded raw RGBA8 tiles | `1028x1028` stored pixels per tile | Detailed color when the tile is resident |
 | Far height map | Max-height raw R16 | `2048x2048` | Conservative far terrain LOD and backdrop |
 | Far color overview | Downsampled raw RGBA8 | `4096x4096` | Color fallback for far or unloaded near terrain |
-| Water mesh tiles | Custom `wmesh1` | Per worldmap | Non-ocean water geometry, including skirts |
+| Water mesh tiles | Custom `wmesh1` | Per worldmap | All-resident non-ocean water geometry, including skirts |
 | Water flow tiles | Raw RG8 | Per worldmap | Packaged flow vectors for later water shading |
 
 With `tile_cache_radius = 1`, the runtime keeps a `3x3` resident cache of near tiles. The default `1024` payload tiles are stored in `3072x3072` near height and near color atlas textures. Generated tile padding is still used while extracting payloads and for CPU collision data. After startup, moving across a tile boundary uploads the newly visible row or column into ring atlas slots while shared tiles stay resident.
 
-Water mesh tiles are loaded for the same resident tile window. Ocean water is not stored as mesh; the renderer creates a full-map ocean plane from the manifest ocean height and relies on terrain-depth rejection to hide it under land.
+Water mesh tiles are not part of the rolling terrain cache. All non-empty non-ocean water mesh tiles are loaded at startup, while ocean water is not stored as mesh; the renderer creates a full-map ocean plane from the manifest ocean height and relies on terrain-depth rejection to hide it under land.
 
 The world width/depth and maximum height come from the manifest:
 
@@ -334,7 +334,7 @@ Fog mixes terrain color toward sky based on horizontal hit distance and `camera.
 
 ## Water Pass
 
-At startup, the renderer creates an ocean plane spanning the full terrain bounds at the manifest ocean height. Moving across terrain tile boundaries loads matching `wmesh1` non-ocean water tiles. The water pass runs after terrain and before the OBJ/cube raster pass, samples terrain-only depth, discards water behind terrain, and writes water color plus updated scene depth.
+At startup, the renderer creates an ocean plane spanning the full terrain bounds at the manifest ocean height and loads every non-empty `wmesh1` non-ocean water tile. The water pass runs after terrain and before the OBJ/cube raster pass, samples terrain-only depth, discards water behind terrain, and writes water color plus updated scene depth.
 
 Generated mesh tiles include vertical skirts on exposed water boundaries to hide gaps against terrain. Flow RG8 tiles are generated with the worldmap but are not used by the current simple water shader.
 

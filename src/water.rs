@@ -21,9 +21,7 @@ pub(crate) struct WaterMaps {
 }
 
 pub(crate) struct WaterTileGpu {
-    tile_x: u32,
-    tile_y: u32,
-    pub(crate) mesh: Option<WaterMeshGpu>,
+    pub(crate) mesh: WaterMeshGpu,
 }
 
 pub(crate) struct WaterMeshGpu {
@@ -39,72 +37,32 @@ struct WaterMeshCpu {
 }
 
 impl WaterMaps {
-    pub(crate) fn load(gpu: &Device, manifest: &WorldmapManifest) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn load(
+        gpu: &Device,
+        manifest: &WorldmapManifest,
+        worldmap_dir: &Path,
+    ) -> Result<Self, Box<dyn Error>> {
         let ocean_cpu = WaterMeshCpu::ocean_plane(manifest, manifest.water.ocean_height);
         let copy_commands = gpu.acquire_command_buffer()?;
         let copy_pass = gpu.begin_copy_pass(&copy_commands)?;
         let ocean = WaterMeshGpu::upload(gpu, &copy_pass, &ocean_cpu)?;
-        gpu.end_copy_pass(copy_pass);
-        copy_commands.submit()?;
-
-        Ok(Self {
-            ocean,
-            tiles: Vec::new(),
-        })
-    }
-
-    pub(crate) fn update_tile_cache(
-        &mut self,
-        gpu: &Device,
-        manifest: &WorldmapManifest,
-        worldmap_dir: &Path,
-        window_min: [u32; 2],
-        window_max: [u32; 2],
-    ) -> Result<(), Box<dyn Error>> {
-        self.tiles.retain(|tile| {
-            tile.tile_x >= window_min[0]
-                && tile.tile_y >= window_min[1]
-                && tile.tile_x <= window_max[0]
-                && tile.tile_y <= window_max[1]
-        });
-
-        let mut missing_tiles = Vec::new();
-        for tile_y in window_min[1]..=window_max[1] {
-            for tile_x in window_min[0]..=window_max[0] {
-                if !self
-                    .tiles
-                    .iter()
-                    .any(|tile| tile.tile_x == tile_x && tile.tile_y == tile_y)
-                {
-                    missing_tiles.push([tile_x, tile_y]);
+        let mut tiles = Vec::new();
+        for tile_y in 0..manifest.tile_count_y {
+            for tile_x in 0..manifest.tile_count_x {
+                let path = manifest.water_mesh_tile_path(worldmap_dir, tile_x, tile_y);
+                let cpu_mesh = WaterMeshCpu::load(&path)?;
+                if cpu_mesh.indices.is_empty() {
+                    continue;
                 }
+                tiles.push(WaterTileGpu {
+                    mesh: WaterMeshGpu::upload(gpu, &copy_pass, &cpu_mesh)?,
+                });
             }
         }
-
-        if missing_tiles.is_empty() {
-            return Ok(());
-        }
-
-        let copy_commands = gpu.acquire_command_buffer()?;
-        let copy_pass = gpu.begin_copy_pass(&copy_commands)?;
-        for [tile_x, tile_y] in missing_tiles {
-            let path = manifest.water_mesh_tile_path(worldmap_dir, tile_x, tile_y);
-            let cpu_mesh = WaterMeshCpu::load(&path)?;
-            let mesh = if cpu_mesh.indices.is_empty() {
-                None
-            } else {
-                Some(WaterMeshGpu::upload(gpu, &copy_pass, &cpu_mesh)?)
-            };
-            self.tiles.push(WaterTileGpu {
-                tile_x,
-                tile_y,
-                mesh,
-            });
-        }
         gpu.end_copy_pass(copy_pass);
         copy_commands.submit()?;
 
-        Ok(())
+        Ok(Self { ocean, tiles })
     }
 }
 
