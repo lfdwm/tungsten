@@ -634,6 +634,8 @@ mod tests {
             color_far_path: "color/far/overview_1.rgba".to_owned(),
             color_far_width: 1,
             color_far_height: 1,
+            props_catalog_path: "props/catalog".to_owned(),
+            props_tiles_path: "props/tiles".to_owned(),
             water: tungsten::worldmap::WaterManifest {
                 source_width: 2,
                 source_height: 2,

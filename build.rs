@@ -9,8 +9,8 @@ use std::{
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=shaders/fullscreen.vert");
     println!("cargo:rerun-if-changed=shaders/voxelspace.frag");
-    println!("cargo:rerun-if-changed=shaders/raster_cube.vert");
-    println!("cargo:rerun-if-changed=shaders/raster_cube.frag");
+    println!("cargo:rerun-if-changed=shaders/props.vert");
+    println!("cargo:rerun-if-changed=shaders/props.frag");
     println!("cargo:rerun-if-changed=shaders/water.vert");
     println!("cargo:rerun-if-changed=shaders/water.frag");
     println!("cargo:rerun-if-changed=shaders/upscale.frag");
@@ -24,14 +24,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         "shaders/voxelspace.frag",
         out_dir.join("voxelspace.frag.spv"),
     )?;
-    compile_shader(
-        "shaders/raster_cube.vert",
-        out_dir.join("raster_cube.vert.spv"),
-    )?;
-    compile_shader(
-        "shaders/raster_cube.frag",
-        out_dir.join("raster_cube.frag.spv"),
-    )?;
+    compile_shader("shaders/props.vert", out_dir.join("props.vert.spv"))?;
+    compile_shader("shaders/props.frag", out_dir.join("props.frag.spv"))?;
     compile_shader("shaders/water.vert", out_dir.join("water.vert.spv"))?;
     compile_shader("shaders/water.frag", out_dir.join("water.frag.spv"))?;
     compile_shader("shaders/upscale.frag", out_dir.join("upscale.frag.spv"))?;

@@ -6,10 +6,10 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 glam = "0.30"
+gltf = { version = "1.4.1", features = ["import", "utils"] }
 image = { version = "0.25.9", default-features = false, features = ["png"] }
 meshopt = "0.6.2"
 png = "0.18.1"
 sdl3 = { version = "0.18.4", default-features = false, features = ["use-pkg-config"] }
 serde = { version = "1.0", features = ["derive"] }
-tobj = { version = "4.0.4", default-features = false }
 toml = "0.9"

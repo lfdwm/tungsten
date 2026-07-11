@@ -15,6 +15,8 @@ pub const HEIGHT_NEAR_DIR: &str = "height/near";
 pub const COLOR_NEAR_DIR: &str = "color/near";
 pub const WATER_MESH_DIR: &str = "water/mesh";
 pub const WATER_FLOW_DIR: &str = "water/flow";
+pub const PROPS_CATALOG_DIR: &str = "props/catalog";
+pub const PROPS_TILES_DIR: &str = "props/tiles";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WaterManifest {
@@ -51,6 +53,8 @@ pub struct WorldmapManifest {
     pub color_far_path: String,
     pub color_far_width: u32,
     pub color_far_height: u32,
+    pub props_catalog_path: String,
+    pub props_tiles_path: String,
     pub water: WaterManifest,
 }
 
@@ -76,6 +80,8 @@ struct WorldmapManifestToml {
     color_far_path: String,
     color_far_width: u32,
     color_far_height: u32,
+    props_catalog_path: String,
+    props_tiles_path: String,
     water_source_width: u32,
     water_source_height: u32,
     water_tile_size_x: u32,
@@ -112,6 +118,8 @@ impl TryFrom<WorldmapManifestToml> for WorldmapManifest {
             color_far_path: toml.color_far_path,
             color_far_width: toml.color_far_width,
             color_far_height: toml.color_far_height,
+            props_catalog_path: toml.props_catalog_path,
+            props_tiles_path: toml.props_tiles_path,
             water: WaterManifest {
                 source_width: toml.water_source_width,
                 source_height: toml.water_source_height,
@@ -151,6 +159,8 @@ impl From<&WorldmapManifest> for WorldmapManifestToml {
             color_far_path: manifest.color_far_path.clone(),
             color_far_width: manifest.color_far_width,
             color_far_height: manifest.color_far_height,
+            props_catalog_path: manifest.props_catalog_path.clone(),
+            props_tiles_path: manifest.props_tiles_path.clone(),
             water_source_width: manifest.water.source_width,
             water_source_height: manifest.water.source_height,
             water_tile_size_x: manifest.water.tile_size_x,
@@ -227,6 +237,8 @@ impl WorldmapManifest {
             || self.height_far_path.is_empty()
             || self.color_near_path.is_empty()
             || self.color_far_path.is_empty()
+            || self.props_catalog_path.is_empty()
+            || self.props_tiles_path.is_empty()
         {
             return Err("manifest paths must not be empty".to_owned());
         }
@@ -383,6 +395,24 @@ impl WorldmapManifest {
         self.water_flow_dir(worldmap_dir)
             .join(water_flow_tile_file_name(tile_x, tile_y))
     }
+
+    pub fn props_catalog_dir(&self, worldmap_dir: impl AsRef<Path>) -> PathBuf {
+        worldmap_dir.as_ref().join(&self.props_catalog_path)
+    }
+
+    pub fn props_tiles_dir(&self, worldmap_dir: impl AsRef<Path>) -> PathBuf {
+        worldmap_dir.as_ref().join(&self.props_tiles_path)
+    }
+
+    pub fn props_tile_path(
+        &self,
+        worldmap_dir: impl AsRef<Path>,
+        tile_x: u32,
+        tile_y: u32,
+    ) -> PathBuf {
+        self.props_tiles_dir(worldmap_dir)
+            .join(props_tile_file_name(tile_x, tile_y))
+    }
 }
 
 pub fn manifest_dir(manifest_path: impl AsRef<Path>) -> Result<PathBuf, Box<dyn Error>> {
@@ -407,6 +437,10 @@ pub fn water_mesh_tile_file_name(tile_x: u32, tile_y: u32) -> String {
 
 pub fn water_flow_tile_file_name(tile_x: u32, tile_y: u32) -> String {
     format!("tile_{tile_x:04}_{tile_y:04}.rg8")
+}
+
+pub fn props_tile_file_name(tile_x: u32, tile_y: u32) -> String {
+    format!("tile_{tile_x:04}_{tile_y:04}.toml")
 }
 
 fn validate_nonzero(value: u32, key: &'static str) -> Result<(), String> {
@@ -442,6 +476,8 @@ mod tests {
             color_far_path: "color/far/overview_4096.rgba".to_owned(),
             color_far_width: 4096,
             color_far_height: 4096,
+            props_catalog_path: PROPS_CATALOG_DIR.to_owned(),
+            props_tiles_path: PROPS_TILES_DIR.to_owned(),
             water: WaterManifest {
                 source_width: 2048,
                 source_height: 2048,
@@ -497,6 +533,10 @@ mod tests {
         assert_eq!(
             parsed.water_flow_tile_path("world", 1, 2),
             PathBuf::from("world/water/flow/tile_0001_0002.rg8")
+        );
+        assert_eq!(
+            parsed.props_tile_path("world", 1, 2),
+            PathBuf::from("world/props/tiles/tile_0001_0002.toml")
         );
     }
 

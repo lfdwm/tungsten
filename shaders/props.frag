@@ -1,15 +1,12 @@
 #version 450
 
 layout(set = 2, binding = 0) uniform sampler2D terrain_depth_texture;
-layout(set = 2, binding = 1) uniform sampler2D diffuse_texture;
-layout(set = 2, binding = 2) uniform sampler2D specular_texture;
-layout(set = 2, binding = 3) uniform sampler2D normal_texture;
+layout(set = 2, binding = 1) uniform sampler2D base_color_texture;
+layout(set = 2, binding = 2) uniform sampler2D normal_texture;
 
-layout(set = 3, binding = 0) uniform RasterParams {
+layout(set = 3, binding = 0) uniform PropsParams {
     vec4 camera;
     vec4 render;
-    vec4 model;
-    vec4 rotation;
     vec4 material_diffuse;
     vec4 material_specular;
     vec4 material_flags;
@@ -38,8 +35,6 @@ float normalized_linear_view_depth(vec3 point) {
     return clamp((view_depth - near_depth) / (far_depth - near_depth), 0.0, 1.0);
 }
 
-// This function returns depth values with a buffer (epsilon)
-// for minimizing flickering / z-fighting.
 const float DEPTH_EPSILON_WORLD = 0.1;
 float normalized_depth_epsilon() {
     float near_depth = render.z;
@@ -50,7 +45,7 @@ float normalized_depth_epsilon() {
 
 vec3 sampled_normal() {
     vec3 normal = normalize(world_normal);
-    if (material_flags.z < 0.5) {
+    if (material_flags.y < 0.5) {
         return normal;
     }
 
@@ -61,44 +56,36 @@ vec3 sampled_normal() {
     return normalize(mat3(tangent, bitangent, normal) * tangent_space_normal);
 }
 
-vec3 material_diffuse_color() {
+vec3 material_base_color() {
     vec3 texture_color = material_flags.x > 0.5
-        ? texture(diffuse_texture, world_uv).rgb
+        ? texture(base_color_texture, world_uv).rgb
         : vec3(1.0);
 
     return material_diffuse.rgb * texture_color;
-}
-
-vec3 material_specular_color() {
-    vec3 texture_color = material_flags.y > 0.5
-        ? texture(specular_texture, world_uv).rgb
-        : vec3(1.0);
-
-    return material_specular.rgb * texture_color;
 }
 
 vec3 phong_color(vec3 normal) {
     vec3 light_dir = normalize(vec3(-0.42, 0.76, -0.35));
     vec3 view_dir = normalize(camera_origin() - world_pos);
     vec3 reflected = reflect(-light_dir, normal);
-    vec3 base_color = material_diffuse_color();
-    vec3 specular_color = material_specular_color();
+    vec3 base_color = material_base_color();
     float diffuse = max(dot(normal, light_dir), 0.0);
     float specular = pow(max(dot(view_dir, reflected), 0.0), material_diffuse.w);
     float sky_fill = max(normal.y, 0.0);
 
-    return base_color * (0.22 + diffuse * 0.62 + sky_fill * 0.12) + specular_color * specular;
+    return base_color * (0.22 + diffuse * 0.62 + sky_fill * 0.12)
+        + material_specular.rgb * specular;
 }
 
 void main() {
-    float cube_depth = normalized_linear_view_depth(world_pos);
+    float prop_depth = normalized_linear_view_depth(world_pos);
     ivec2 depth_size = textureSize(terrain_depth_texture, 0);
     ivec2 depth_pixel = clamp(ivec2(gl_FragCoord.xy), ivec2(0), depth_size - ivec2(1));
     float terrain_depth = clamp(texelFetch(terrain_depth_texture, depth_pixel, 0).r, 0.0, 1.0);
-    if (cube_depth > terrain_depth + normalized_depth_epsilon()) {
+    if (prop_depth > terrain_depth + normalized_depth_epsilon()) {
         discard;
     }
 
     out_color = vec4(phong_color(sampled_normal()), 1.0);
-    out_scene_depth = cube_depth;
+    out_scene_depth = prop_depth;
 }

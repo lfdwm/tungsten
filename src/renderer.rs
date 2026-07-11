@@ -18,14 +18,14 @@ use sdl3::{
 use crate::{
     camera::Camera,
     config::AppConfig,
-    raster_model::{RasterModelCpu, RasterModelGpu, RasterVertex, create_raster_model_sampler},
+    props::{PropInstanceGpu, PropScene, PropVertex, create_prop_sampler},
     terrain::TerrainMaps,
     water::WaterVertex,
 };
 
 const RAYMARCH_START_DISTANCE: f32 = 0.05;
 const DEPTH_TARGET_FORMAT: TextureFormat = TextureFormat::R32Float;
-const CUBE_DEPTH_TARGET_FORMAT: TextureFormat = TextureFormat::D32Float;
+const MESH_DEPTH_TARGET_FORMAT: TextureFormat = TextureFormat::D32Float;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -55,11 +55,9 @@ struct UpscaleParams {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct RasterParams {
+struct PropsParams {
     camera: [f32; 4],
     render: [f32; 4],
-    model: [f32; 4],
-    rotation: [f32; 4],
     material_diffuse: [f32; 4],
     material_specular: [f32; 4],
     material_flags: [f32; 4],
@@ -82,7 +80,7 @@ struct RenderTarget {
     color_texture: Texture<'static>,
     terrain_depth_texture: Texture<'static>,
     scene_depth_texture: Texture<'static>,
-    cube_depth_texture: Texture<'static>,
+    mesh_depth_texture: Texture<'static>,
     width: u32,
     height: u32,
 }
@@ -153,41 +151,23 @@ pub(crate) struct OverlayStats {
 pub(crate) struct Renderer {
     terrain_pipeline: GraphicsPipeline,
     water_pipeline: GraphicsPipeline,
-    raster_pipeline: GraphicsPipeline,
+    props_pipeline: GraphicsPipeline,
     upscale_pipeline: GraphicsPipeline,
     upscale_sampler: Sampler,
-    raster_sampler: Sampler,
-    cube_model: RasterModelGpu,
-    raster_model: Option<RasterModelGpu>,
+    prop_sampler: Sampler,
     render_target: Option<RenderTarget>,
     target_format: TextureFormat,
 }
 
 impl Renderer {
-    pub(crate) fn new(
-        gpu: &Device,
-        target_format: TextureFormat,
-        config: &AppConfig,
-    ) -> Result<Self, Box<dyn Error>> {
-        let cube_model = RasterModelGpu::upload(gpu, &RasterModelCpu::cube())?;
-        let raster_model =
-            if config.raster_model_enabled && !config.raster_model_path.as_os_str().is_empty() {
-                let cpu_model = RasterModelCpu::load_obj(&config.raster_model_path)?;
-                let _model_bounds = (cpu_model.bounds_min, cpu_model.bounds_max);
-                Some(RasterModelGpu::upload(gpu, &cpu_model)?)
-            } else {
-                None
-            };
-
+    pub(crate) fn new(gpu: &Device, target_format: TextureFormat) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             terrain_pipeline: create_terrain_pipeline(gpu, target_format)?,
             water_pipeline: create_water_pipeline(gpu, target_format)?,
-            raster_pipeline: create_raster_pipeline(gpu, target_format)?,
+            props_pipeline: create_props_pipeline(gpu, target_format)?,
             upscale_pipeline: create_upscale_pipeline(gpu, target_format)?,
             upscale_sampler: create_upscale_sampler(gpu)?,
-            raster_sampler: create_raster_model_sampler(gpu)?,
-            cube_model,
-            raster_model,
+            prop_sampler: create_prop_sampler(gpu)?,
             render_target: None,
             target_format,
         })
@@ -198,6 +178,7 @@ impl Renderer {
         gpu: &Device,
         window: &Window,
         terrain_maps: &TerrainMaps,
+        props: &PropScene,
         camera: &Camera,
         config: &AppConfig,
         debug_visual_mode: DebugVisualMode,
@@ -280,7 +261,7 @@ impl Renderer {
                 .with_store_op(StoreOp::STORE),
         ];
         let depth_target = DepthStencilTargetInfo::new()
-            .with_texture(&mut render_target.cube_depth_texture)
+            .with_texture(&mut render_target.mesh_depth_texture)
             .with_cycle(true)
             .with_clear_depth(1.0)
             .with_load_op(LoadOp::CLEAR)
@@ -330,37 +311,7 @@ impl Renderer {
         }
         gpu.end_render_pass(water_pass);
 
-        let raster_draw = if config.raster_model_enabled {
-            self.raster_model.as_ref().map(|model| {
-                let yaw = config.raster_model_yaw_degrees.to_radians();
-                (
-                    model,
-                    [
-                        config.raster_model_x,
-                        config.raster_model_y,
-                        config.raster_model_height,
-                        config.raster_model_scale,
-                    ],
-                    [yaw.cos(), yaw.sin(), 0.0, 0.0],
-                )
-            })
-        } else {
-            None
-        }
-        .or_else(|| {
-            config.raster_cube_enabled.then_some((
-                &self.cube_model,
-                [
-                    config.raster_cube_x,
-                    config.raster_cube_y,
-                    config.raster_cube_height,
-                    config.raster_cube_size,
-                ],
-                [1.0, 0.0, 0.0, 0.0],
-            ))
-        });
-
-        if let Some((model, model_transform, rotation)) = raster_draw {
+        if !props.draw_groups().is_empty() {
             let color_targets = [
                 ColorTargetInfo::default()
                     .with_texture(&render_target.color_texture)
@@ -373,65 +324,76 @@ impl Renderer {
             ];
 
             let depth_target = DepthStencilTargetInfo::new()
-                .with_texture(&mut render_target.cube_depth_texture)
+                .with_texture(&mut render_target.mesh_depth_texture)
                 .with_cycle(true)
                 .with_clear_depth(1.0)
                 .with_load_op(LoadOp::CLEAR)
                 .with_store_op(StoreOp::STORE);
 
-            let raster_pass =
+            let props_pass =
                 gpu.begin_render_pass(&command_buffer, &color_targets, Some(&depth_target))?;
-            raster_pass.bind_graphics_pipeline(&self.raster_pipeline);
-            for batch in &model.batches {
-                let material = model
-                    .materials
-                    .get(batch.material_index)
-                    .unwrap_or(&model.materials[0]);
-                let raster_params = raster_params(
-                    camera,
-                    render_target.width,
-                    render_target.height,
-                    model_transform,
-                    rotation,
-                    material.diffuse,
-                    material.specular,
-                    material.flags,
-                );
+            props_pass.bind_graphics_pipeline(&self.props_pipeline);
+            for group in props.draw_groups() {
+                let Some(model) = props.model(&group.model_path) else {
+                    continue;
+                };
+                for mesh in &model.meshes {
+                    let material = model
+                        .materials
+                        .get(mesh.material_index)
+                        .unwrap_or(&model.materials[0]);
+                    let props_params = props_params(
+                        camera,
+                        render_target.width,
+                        render_target.height,
+                        material.base_color,
+                        material.specular,
+                        material.flags,
+                    );
 
-                raster_pass.bind_vertex_buffers(
-                    0,
-                    &[BufferBinding::new()
-                        .with_buffer(&batch.vertex_buffer)
-                        .with_offset(0)],
-                );
-                raster_pass.bind_index_buffer(
-                    &BufferBinding::new()
-                        .with_buffer(&batch.index_buffer)
-                        .with_offset(0),
-                    IndexElementSize::_32BIT,
-                );
-                raster_pass.bind_fragment_samplers(
-                    0,
-                    &[
-                        TextureSamplerBinding::new()
-                            .with_texture(&render_target.terrain_depth_texture)
-                            .with_sampler(&self.upscale_sampler),
-                        TextureSamplerBinding::new()
-                            .with_texture(&material.diffuse_texture)
-                            .with_sampler(&self.raster_sampler),
-                        TextureSamplerBinding::new()
-                            .with_texture(&material.specular_texture)
-                            .with_sampler(&self.raster_sampler),
-                        TextureSamplerBinding::new()
-                            .with_texture(&material.normal_texture)
-                            .with_sampler(&self.raster_sampler),
-                    ],
-                );
-                command_buffer.push_vertex_uniform_data(0, &raster_params);
-                command_buffer.push_fragment_uniform_data(0, &raster_params);
-                raster_pass.draw_indexed_primitives(batch.index_count, 1, 0, 0, 0);
+                    props_pass.bind_vertex_buffers(
+                        0,
+                        &[
+                            BufferBinding::new()
+                                .with_buffer(&mesh.vertex_buffer)
+                                .with_offset(0),
+                            BufferBinding::new()
+                                .with_buffer(&group.instance_buffer)
+                                .with_offset(0),
+                        ],
+                    );
+                    props_pass.bind_index_buffer(
+                        &BufferBinding::new()
+                            .with_buffer(&mesh.index_buffer)
+                            .with_offset(0),
+                        IndexElementSize::_32BIT,
+                    );
+                    props_pass.bind_fragment_samplers(
+                        0,
+                        &[
+                            TextureSamplerBinding::new()
+                                .with_texture(&render_target.terrain_depth_texture)
+                                .with_sampler(&self.upscale_sampler),
+                            TextureSamplerBinding::new()
+                                .with_texture(&material.base_color_texture)
+                                .with_sampler(&self.prop_sampler),
+                            TextureSamplerBinding::new()
+                                .with_texture(&material.normal_texture)
+                                .with_sampler(&self.prop_sampler),
+                        ],
+                    );
+                    command_buffer.push_vertex_uniform_data(0, &props_params);
+                    command_buffer.push_fragment_uniform_data(0, &props_params);
+                    props_pass.draw_indexed_primitives(
+                        mesh.index_count,
+                        group.instance_count,
+                        0,
+                        0,
+                        0,
+                    );
+                }
             }
-            gpu.end_render_pass(raster_pass);
+            gpu.end_render_pass(props_pass);
         }
 
         if let Ok(swapchain) = command_buffer.wait_and_acquire_swapchain_texture(window) {
@@ -604,14 +566,14 @@ fn create_water_pipeline(
                     ColorTargetDescription::new().with_format(DEPTH_TARGET_FORMAT),
                 ])
                 .with_has_depth_stencil_target(true)
-                .with_depth_stencil_format(CUBE_DEPTH_TARGET_FORMAT),
+                .with_depth_stencil_format(MESH_DEPTH_TARGET_FORMAT),
         )
         .build()?;
 
     Ok(pipeline)
 }
 
-fn create_raster_pipeline(
+fn create_props_pipeline(
     gpu: &Device,
     target_format: TextureFormat,
 ) -> Result<GraphicsPipeline, Box<dyn Error>> {
@@ -619,7 +581,7 @@ fn create_raster_pipeline(
         .create_shader()
         .with_code(
             ShaderFormat::SPIRV,
-            include_bytes!(concat!(env!("OUT_DIR"), "/raster_cube.vert.spv")),
+            include_bytes!(concat!(env!("OUT_DIR"), "/props.vert.spv")),
             ShaderStage::Vertex,
         )
         .with_uniform_buffers(1)
@@ -630,10 +592,10 @@ fn create_raster_pipeline(
         .create_shader()
         .with_code(
             ShaderFormat::SPIRV,
-            include_bytes!(concat!(env!("OUT_DIR"), "/raster_cube.frag.spv")),
+            include_bytes!(concat!(env!("OUT_DIR"), "/props.frag.spv")),
             ShaderStage::Fragment,
         )
-        .with_samplers(4)
+        .with_samplers(3)
         .with_uniform_buffers(1)
         .with_entrypoint(c"main")
         .build()?;
@@ -645,11 +607,18 @@ fn create_raster_pipeline(
         .with_primitive_type(PrimitiveType::TriangleList)
         .with_vertex_input_state(
             VertexInputState::new()
-                .with_vertex_buffer_descriptions(&[VertexBufferDescription::new()
-                    .with_slot(0)
-                    .with_pitch(size_of::<RasterVertex>() as u32)
-                    .with_input_rate(VertexInputRate::Vertex)
-                    .with_instance_step_rate(0)])
+                .with_vertex_buffer_descriptions(&[
+                    VertexBufferDescription::new()
+                        .with_slot(0)
+                        .with_pitch(size_of::<PropVertex>() as u32)
+                        .with_input_rate(VertexInputRate::Vertex)
+                        .with_instance_step_rate(0),
+                    VertexBufferDescription::new()
+                        .with_slot(1)
+                        .with_pitch(size_of::<PropInstanceGpu>() as u32)
+                        .with_input_rate(VertexInputRate::Instance)
+                        .with_instance_step_rate(1),
+                ])
                 .with_vertex_attributes(&[
                     VertexAttribute::new()
                         .with_format(VertexElementFormat::Float3)
@@ -671,6 +640,16 @@ fn create_raster_pipeline(
                         .with_location(3)
                         .with_buffer_slot(0)
                         .with_offset(size_of::<[f32; 8]>() as u32),
+                    VertexAttribute::new()
+                        .with_format(VertexElementFormat::Float4)
+                        .with_location(4)
+                        .with_buffer_slot(1)
+                        .with_offset(0),
+                    VertexAttribute::new()
+                        .with_format(VertexElementFormat::Float4)
+                        .with_location(5)
+                        .with_buffer_slot(1)
+                        .with_offset(size_of::<[f32; 4]>() as u32),
                 ]),
         )
         .with_rasterizer_state(
@@ -692,7 +671,7 @@ fn create_raster_pipeline(
                     ColorTargetDescription::new().with_format(DEPTH_TARGET_FORMAT),
                 ])
                 .with_has_depth_stencil_target(true)
-                .with_depth_stencil_format(CUBE_DEPTH_TARGET_FORMAT),
+                .with_depth_stencil_format(MESH_DEPTH_TARGET_FORMAT),
         )
         .build()?;
 
@@ -753,19 +732,17 @@ fn upscale_params(
     }
 }
 
-fn raster_params(
+fn props_params(
     camera: &Camera,
     width: u32,
     height: u32,
-    model: [f32; 4],
-    rotation: [f32; 4],
     material_diffuse: [f32; 4],
     material_specular: [f32; 4],
     material_flags: [f32; 4],
-) -> RasterParams {
+) -> PropsParams {
     let ray_basis = camera_ray_basis(camera, width, height);
 
-    RasterParams {
+    PropsParams {
         camera: [camera.x, camera.y, camera.height, 0.0],
         render: [
             width as f32,
@@ -773,8 +750,6 @@ fn raster_params(
             RAYMARCH_START_DISTANCE,
             camera.max_distance,
         ],
-        model,
-        rotation,
         material_diffuse,
         material_specular,
         material_flags,
@@ -835,7 +810,7 @@ fn ensure_render_target(
                 height,
                 DEPTH_TARGET_FORMAT,
             )?,
-            cube_depth_texture: create_depth_target_texture(gpu, width, height)?,
+            mesh_depth_texture: create_depth_target_texture(gpu, width, height)?,
             width,
             height,
         });
@@ -869,7 +844,7 @@ fn create_depth_target_texture(
 ) -> Result<Texture<'static>, Box<dyn Error>> {
     Ok(gpu.create_texture(
         TextureCreateInfo::new()
-            .with_format(CUBE_DEPTH_TARGET_FORMAT)
+            .with_format(MESH_DEPTH_TARGET_FORMAT)
             .with_type(TextureType::_2D)
             .with_width(width)
             .with_height(height)
@@ -1015,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn raster_params_use_config_world_coordinates() {
+    fn props_params_use_camera_and_material_values() {
         let camera = Camera {
             x: 1.0,
             y: 2.0,
@@ -1026,12 +1001,10 @@ mod tests {
             max_distance: 1000.0,
         };
 
-        let params = raster_params(
+        let params = props_params(
             &camera,
             800,
             400,
-            [12.0, 34.0, 56.0, 7.0],
-            [1.0, 0.0, 0.0, 0.0],
             [0.8, 0.7, 0.6, 28.0],
             [0.1, 0.2, 0.3, 0.0],
             [1.0, 0.0, 0.0, 0.0],
@@ -1042,8 +1015,6 @@ mod tests {
             params.render,
             [800.0, 400.0, RAYMARCH_START_DISTANCE, 1000.0]
         );
-        assert_eq!(params.model, [12.0, 34.0, 56.0, 7.0]);
-        assert_eq!(params.rotation, [1.0, 0.0, 0.0, 0.0]);
         assert_eq!(params.material_diffuse, [0.8, 0.7, 0.6, 28.0]);
     }
 }

@@ -6,10 +6,10 @@ This document describes the current terrain renderer in `tungsten`. The renderer
 - Runtime config parsing: `src/config.rs`
 - Camera, replay, and player movement: `src/camera.rs`
 - Render-pass orchestration: `src/renderer.rs`
-- OBJ/MTL raster asset loading: `src/raster_model.rs`
+- glTF prop asset loading and streaming: `src/props.rs`
 - Terrain data, tile streaming, and collision height field: `src/terrain.rs`
 - Terrain fragment shader: `shaders/voxelspace.frag`
-- Raster cube shaders: `shaders/raster_cube.vert`, `shaders/raster_cube.frag`
+- Prop raster shaders: `shaders/props.vert`, `shaders/props.frag`
 - Upscale and overlay shader: `shaders/upscale.frag`
 - Runtime settings: `config.toml`
 
@@ -34,18 +34,19 @@ flowchart TD
     SceneDepth --> Water
     Water --> LowResColor
     Water --> SceneDepth
-    Config --> RasterModel[Raster model pass]
-    TerrainDepth --> RasterModel
-    LowResColor --> RasterModel
-    SceneDepth --> RasterModel
-    RasterModel --> LowResColor
-    RasterModel --> SceneDepth
+    Terrain --> Props[Prop streaming]
+    Props --> PropPass[Instanced prop pass]
+    TerrainDepth --> PropPass
+    LowResColor --> PropPass
+    SceneDepth --> PropPass
+    PropPass --> LowResColor
+    PropPass --> SceneDepth
     LowResColor --> Upscale[upscale.frag]
     SceneDepth --> Upscale
     Upscale --> Swapchain[Window swapchain]
 ```
 
-The app renders the terrain into offscreen color, terrain-only normalized linear depth, and scene normalized linear depth targets whose size is controlled by `performance_render_scale`. The water pass then draws a map-wide ocean plane and all-resident non-ocean water mesh tiles against terrain depth, writing updated color and scene depth. The optional raster model pass then runs before upscale, samples terrain depth for visibility, and writes raster color plus updated scene depth. The color result is then nearest-neighbor upscaled to the swapchain. The scene depth target is sampled by the upscale pass for the depth debug view and is available for later passes. The upscale pass also draws the FPS and frame-time overlay.
+The app renders the terrain into offscreen color, terrain-only normalized linear depth, and scene normalized linear depth targets whose size is controlled by `performance_render_scale`. The water pass then draws a map-wide ocean plane and all-resident non-ocean water mesh tiles against terrain depth, writing updated color and scene depth. The prop pass then draws streamed instanced glTF meshes before upscale, samples terrain depth for visibility, and writes prop color plus updated scene depth. The color result is then nearest-neighbor upscaled to the swapchain. The scene depth target is sampled by the upscale pass for the depth debug view and is available for later passes. The upscale pass also draws the FPS and frame-time overlay.
 
 ## Terrain Assets
 
@@ -65,6 +66,8 @@ The package format is documented in [worldmaps.md](worldmaps.md). Runtime terrai
 | Far color overview | Downsampled raw RGBA8 | `4096x4096` | Color fallback for far or unloaded near terrain |
 | Water mesh tiles | Custom `wmesh1` | Per worldmap | All-resident non-ocean water geometry, including skirts |
 | Water flow tiles | Raw RG8 | Per worldmap | Packaged flow vectors for later water shading |
+| Prop catalog | TOML | One file per prop type | Maps prop ids to glTF/GLB asset paths |
+| Prop tiles | TOML | Optional file per terrain tile | Streamed prop instances for the resident tile window |
 
 With `tile_cache_radius = 1`, the runtime keeps a `3x3` resident cache of near tiles. The default `1024` payload tiles are stored in `3072x3072` near height and near color atlas textures. Generated tile padding is still used while extracting payloads and for CPU collision data. After startup, moving across a tile boundary uploads the newly visible row or column into ring atlas slots while shared tiles stay resident.
 
@@ -334,19 +337,19 @@ Fog mixes terrain color toward sky based on horizontal hit distance and `camera.
 
 ## Water Pass
 
-At startup, the renderer creates an ocean plane spanning the full terrain bounds at the manifest ocean height and loads every non-empty `wmesh1` non-ocean water tile. The water pass runs after terrain and before the OBJ/cube raster pass, samples terrain-only depth, discards water behind terrain, and writes water color plus updated scene depth.
+At startup, the renderer creates an ocean plane spanning the full terrain bounds at the manifest ocean height and loads every non-empty `wmesh1` non-ocean water tile. The water pass runs after terrain and before the prop pass, samples terrain-only depth, discards water behind terrain, and writes water color plus updated scene depth.
 
 Generated mesh tiles include vertical skirts on exposed water boundaries to hide gaps against terrain. Flow RG8 tiles are generated with the worldmap but are not used by the current simple water shader.
 
-## Raster Model Pass
+## Prop Pass
 
-When `raster_model_enabled` is true and `raster_model_path` points at an OBJ file, startup loads the OBJ/MTL through `tobj`, decodes PNG material maps, uploads the model to SDL GPU buffers/textures, and draws it after terrain rendering and before the upscale pass. The raster vertex shader uses the same camera origin, ray basis, vertical FoV, near distance, and `camera.max_distance` depth normalization as the terrain shader.
+Prop content is authored in the worldmap package. The manifest points at a catalog directory and a tile-instance directory. The catalog has one TOML file per prop type, and each definition names a glTF/GLB model path. Runtime prop tile files are loaded for the same resident tile window as terrain.
 
-OBJ material support is intentionally narrow: diffuse maps use `map_Kd`, specular maps use `map_Ks`, and normal maps use `norm`/`bump`/`map_Bump` where exposed by the material. Texture images must be PNG. Missing maps use generated fallbacks, and models without UVs render without normal mapping.
+For each active tile, prop instances resolve source-pixel coordinates into world X/Y coordinates using `horizontal_scale`. `height_mode = "terrain"` samples CPU collision height from the resident terrain tiles and adds `height_offset`; `height_mode = "absolute"` uses the authored height. Pitch, yaw, and roll are converted to a CPU-side quaternion, then uploaded with world position and uniform scale as a per-instance vertex buffer.
 
-The raster pass uses a raster-only hardware depth target for model self-occlusion. The fragment shader applies basic Phong shading with diffuse/specular/normal material sampling and samples the terrain-only depth texture at the fragment's screen position. If the terrain depth is nearer than the raster depth, the fragment is discarded. Surviving fragments write over the offscreen color target and update the scene depth target. Later passes should sample scene depth when they want visibility for terrain plus raster geometry, and terrain depth when they specifically need terrain-only visibility.
+The glTF loader imports the default scene, traverses node transforms, reads triangle primitives, and uploads indexed mesh batches with base color and normal textures. Missing normals and tangents are generated. V1 maps glTF PBR material data onto the renderer's simple Phong-style prop shader; fuller PBR shading is deferred to a renderer/material cleanup.
 
-When `raster_cube_enabled` is true, the same raster path draws the built-in debug cube. If both a configured model and the debug cube are enabled, the configured model is drawn.
+The prop pass uses a raster-only hardware depth target for mesh self-occlusion. The fragment shader applies basic lighting and samples the terrain-only depth texture at the fragment's screen position. If terrain depth is nearer than prop depth, the fragment is discarded. Surviving fragments write over the offscreen color target and update the scene depth target. Later passes should sample scene depth when they want visibility for terrain plus props, and terrain depth when they specifically need terrain-only visibility.
 
 ## Runtime Config
 
@@ -363,18 +366,6 @@ Missing keys use built-in defaults from `src/config.rs`.
 | `present_mode` | `"vsync"` | `"vsync"`, `"immediate"`, `"mailbox"` | SDL GPU swapchain present mode. |
 | `max_framerate` | `0.0` | `>= 0.0` | CPU-side framerate cap. `0.0` means unlimited. |
 | `render_debug_visuals` | `false` | `true` or `false` | Enables cycling terrain debug views with `F3`. |
-| `raster_cube_enabled` | `false` | `true` or `false` | Draws a Phong-shaded test cube between terrain rendering and upscale. |
-| `raster_cube_x` | `320.0` | `>= 0.0` | Test cube center X coordinate in world units. |
-| `raster_cube_y` | `240.0` | `>= 0.0` | Test cube center Y coordinate in world units, mapped to shader Z. |
-| `raster_cube_height` | `120.0` | `>= 0.0` | Test cube center height in world units. |
-| `raster_cube_size` | `64.0` | `> 0.0` | Test cube edge length in world units. |
-| `raster_model_enabled` | `false` | `true` or `false` | Loads and draws a configured OBJ raster model at startup. |
-| `raster_model_path` | `""` | path or empty string | OBJ model path. Empty keeps model loading disabled and allows the cube debug path. |
-| `raster_model_x` | `320.0` | `>= 0.0` | Model origin X coordinate in world units. |
-| `raster_model_y` | `240.0` | `>= 0.0` | Model origin Y coordinate in world units, mapped to shader Z. |
-| `raster_model_height` | `120.0` | `>= 0.0` | Model origin height in world units. |
-| `raster_model_scale` | `1.0` | `> 0.0` | Uniform model scale in world units per OBJ unit. |
-| `raster_model_yaw_degrees` | `0.0` | finite number | Rotation around the world height axis. |
 | `near_dda_distance` | `512.0` | `> 0.0` | Horizontal distance covered by near detailed DDA before main raymarching. |
 | `near_dda_max_steps` | `1024` | `1..4096` | Maximum resident near-height cells the DDA may traverse before handing off to the main raymarch. |
 | `start_x` | `250.0` | `>= 0.0` | Initial camera/player X coordinate. |
@@ -438,9 +429,9 @@ Scene depth grayscale:
 
 | Color | Meaning |
 | --- | --- |
-| White | Near terrain or raster geometry |
+| White | Near terrain or prop geometry |
 | Gray | Increasing normalized linear view depth |
-| Black | Far terrain, far raster geometry, and sky |
+| Black | Far terrain, far prop geometry, and sky |
 
 ## Collision and Gravity Mode
 

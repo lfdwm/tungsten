@@ -23,18 +23,6 @@ const DEFAULT_PERFORMANCE_RENDER_SCALE: f32 = 0.5;
 const DEFAULT_PRESENT_MODE: AppPresentMode = AppPresentMode::Vsync;
 const DEFAULT_MAX_FRAMERATE: f32 = 0.0;
 const DEFAULT_RENDER_DEBUG_VISUALS: bool = false;
-const DEFAULT_RASTER_CUBE_ENABLED: bool = false;
-const DEFAULT_RASTER_CUBE_X: f32 = 320.0;
-const DEFAULT_RASTER_CUBE_Y: f32 = 240.0;
-const DEFAULT_RASTER_CUBE_HEIGHT: f32 = 120.0;
-const DEFAULT_RASTER_CUBE_SIZE: f32 = 64.0;
-const DEFAULT_RASTER_MODEL_ENABLED: bool = false;
-const DEFAULT_RASTER_MODEL_PATH: &str = "";
-const DEFAULT_RASTER_MODEL_X: f32 = 320.0;
-const DEFAULT_RASTER_MODEL_Y: f32 = 240.0;
-const DEFAULT_RASTER_MODEL_HEIGHT: f32 = 120.0;
-const DEFAULT_RASTER_MODEL_SCALE: f32 = 1.0;
-const DEFAULT_RASTER_MODEL_YAW_DEGREES: f32 = 0.0;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -46,18 +34,6 @@ pub(crate) struct AppConfig {
     pub(crate) present_mode: AppPresentMode,
     pub(crate) max_framerate: f32,
     pub(crate) render_debug_visuals: bool,
-    pub(crate) raster_cube_enabled: bool,
-    pub(crate) raster_cube_x: f32,
-    pub(crate) raster_cube_y: f32,
-    pub(crate) raster_cube_height: f32,
-    pub(crate) raster_cube_size: f32,
-    pub(crate) raster_model_enabled: bool,
-    pub(crate) raster_model_path: PathBuf,
-    pub(crate) raster_model_x: f32,
-    pub(crate) raster_model_y: f32,
-    pub(crate) raster_model_height: f32,
-    pub(crate) raster_model_scale: f32,
-    pub(crate) raster_model_yaw_degrees: f32,
     pub(crate) near_dda_distance: f32,
     pub(crate) near_dda_max_steps: u32,
     pub(crate) start_x: f32,
@@ -107,18 +83,6 @@ impl Default for AppConfig {
             present_mode: DEFAULT_PRESENT_MODE,
             max_framerate: DEFAULT_MAX_FRAMERATE,
             render_debug_visuals: DEFAULT_RENDER_DEBUG_VISUALS,
-            raster_cube_enabled: DEFAULT_RASTER_CUBE_ENABLED,
-            raster_cube_x: DEFAULT_RASTER_CUBE_X,
-            raster_cube_y: DEFAULT_RASTER_CUBE_Y,
-            raster_cube_height: DEFAULT_RASTER_CUBE_HEIGHT,
-            raster_cube_size: DEFAULT_RASTER_CUBE_SIZE,
-            raster_model_enabled: DEFAULT_RASTER_MODEL_ENABLED,
-            raster_model_path: PathBuf::from(DEFAULT_RASTER_MODEL_PATH),
-            raster_model_x: DEFAULT_RASTER_MODEL_X,
-            raster_model_y: DEFAULT_RASTER_MODEL_Y,
-            raster_model_height: DEFAULT_RASTER_MODEL_HEIGHT,
-            raster_model_scale: DEFAULT_RASTER_MODEL_SCALE,
-            raster_model_yaw_degrees: DEFAULT_RASTER_MODEL_YAW_DEGREES,
             near_dda_distance: DEFAULT_NEAR_DDA_DISTANCE,
             near_dda_max_steps: DEFAULT_NEAR_DDA_MAX_STEPS,
             start_x: DEFAULT_START_X,
@@ -152,15 +116,6 @@ impl AppConfig {
         validate_finite_values(&[
             ("performance_render_scale", self.performance_render_scale),
             ("max_framerate", self.max_framerate),
-            ("raster_cube_x", self.raster_cube_x),
-            ("raster_cube_y", self.raster_cube_y),
-            ("raster_cube_height", self.raster_cube_height),
-            ("raster_cube_size", self.raster_cube_size),
-            ("raster_model_x", self.raster_model_x),
-            ("raster_model_y", self.raster_model_y),
-            ("raster_model_height", self.raster_model_height),
-            ("raster_model_scale", self.raster_model_scale),
-            ("raster_model_yaw_degrees", self.raster_model_yaw_degrees),
             ("near_dda_distance", self.near_dda_distance),
             ("start_x", self.start_x),
             ("start_y", self.start_y),
@@ -202,25 +157,6 @@ impl AppConfig {
         }
         if self.start_x < 0.0 || self.start_y < 0.0 || self.start_height < 0.0 {
             return Err("`start_x`, `start_y`, and `start_height` must be non-negative".to_owned());
-        }
-        if self.raster_cube_x < 0.0 || self.raster_cube_y < 0.0 || self.raster_cube_height < 0.0 {
-            return Err(
-                "`raster_cube_x`, `raster_cube_y`, and `raster_cube_height` must be non-negative"
-                    .to_owned(),
-            );
-        }
-        if self.raster_cube_size <= 0.0 {
-            return Err("`raster_cube_size` must be greater than 0.0".to_owned());
-        }
-        if self.raster_model_x < 0.0 || self.raster_model_y < 0.0 || self.raster_model_height < 0.0
-        {
-            return Err(
-                "`raster_model_x`, `raster_model_y`, and `raster_model_height` must be non-negative"
-                    .to_owned(),
-            );
-        }
-        if self.raster_model_scale <= 0.0 {
-            return Err("`raster_model_scale` must be greater than 0.0".to_owned());
         }
         validate_blend_range(
             "height_lod",
@@ -277,18 +213,6 @@ mod tests {
             present_mode = "mailbox"
             max_framerate = 120.0
             render_debug_visuals = true
-            raster_cube_enabled = true
-            raster_cube_x = 321.0
-            raster_cube_y = 654.0
-            raster_cube_height = 87.0
-            raster_cube_size = 48.0
-            raster_model_enabled = true
-            raster_model_path = "assets/models/test.obj"
-            raster_model_x = 111.0
-            raster_model_y = 222.0
-            raster_model_height = 33.0
-            raster_model_scale = 4.5
-            raster_model_yaw_degrees = 90.0
             near_dda_distance = 96.0
             near_dda_max_steps = 128
             start_x = 123.0
@@ -310,21 +234,6 @@ mod tests {
         assert_eq!(config.present_mode, AppPresentMode::Mailbox);
         assert_eq!(config.max_framerate, 120.0);
         assert!(config.render_debug_visuals);
-        assert!(config.raster_cube_enabled);
-        assert_eq!(config.raster_cube_x, 321.0);
-        assert_eq!(config.raster_cube_y, 654.0);
-        assert_eq!(config.raster_cube_height, 87.0);
-        assert_eq!(config.raster_cube_size, 48.0);
-        assert!(config.raster_model_enabled);
-        assert_eq!(
-            config.raster_model_path,
-            PathBuf::from("assets/models/test.obj")
-        );
-        assert_eq!(config.raster_model_x, 111.0);
-        assert_eq!(config.raster_model_y, 222.0);
-        assert_eq!(config.raster_model_height, 33.0);
-        assert_eq!(config.raster_model_scale, 4.5);
-        assert_eq!(config.raster_model_yaw_degrees, 90.0);
         assert_eq!(config.near_dda_distance, 96.0);
         assert_eq!(config.near_dda_max_steps, 128);
         assert_eq!(config.start_x, 123.0);
@@ -445,51 +354,12 @@ mod tests {
 
         let error = AppConfig::parse(
             r#"
-            raster_cube_enabled = maybe
+            unknown_key = true
             "#,
         )
         .unwrap_err();
-        assert!(error.contains("invalid") || error.contains("expected"));
-
-        let error = AppConfig::parse(
-            r#"
-            raster_cube_x = -1.0
-            "#,
-        )
-        .unwrap_err();
-        assert!(error.contains("raster_cube_x"));
-
-        let error = AppConfig::parse(
-            r#"
-            raster_cube_size = 0.0
-            "#,
-        )
-        .unwrap_err();
-        assert!(error.contains("raster_cube_size"));
-
-        let error = AppConfig::parse(
-            r#"
-            raster_model_enabled = maybe
-            "#,
-        )
-        .unwrap_err();
-        assert!(error.contains("invalid") || error.contains("expected"));
-
-        let error = AppConfig::parse(
-            r#"
-            raster_model_x = -1.0
-            "#,
-        )
-        .unwrap_err();
-        assert!(error.contains("raster_model_x"));
-
-        let error = AppConfig::parse(
-            r#"
-            raster_model_scale = 0.0
-            "#,
-        )
-        .unwrap_err();
-        assert!(error.contains("raster_model_scale"));
+        assert!(error.contains("unknown_key"));
+        assert!(error.contains("unknown field"));
 
         let error = AppConfig::parse(
             r#"
@@ -519,19 +389,5 @@ mod tests {
 
         assert!(error.contains("performance_render_scale"));
         assert!(error.contains("finite"));
-    }
-
-    #[test]
-    fn allows_empty_disabled_raster_model_path() {
-        let config = AppConfig::parse(
-            r#"
-            raster_model_enabled = false
-            raster_model_path = ""
-            "#,
-        )
-        .unwrap();
-
-        assert!(!config.raster_model_enabled);
-        assert!(config.raster_model_path.as_os_str().is_empty());
     }
 }

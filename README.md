@@ -16,20 +16,6 @@ render_debug_visuals = false
 near_dda_distance = 512.0
 near_dda_max_steps = 1024
 
-raster_cube_enabled = false
-raster_cube_x = 320.0
-raster_cube_y = 240.0
-raster_cube_height = 120.0
-raster_cube_size = 64.0
-
-raster_model_enabled = false
-raster_model_path = ""
-raster_model_x = 320.0
-raster_model_y = 240.0
-raster_model_height = 120.0
-raster_model_scale = 1.0
-raster_model_yaw_degrees = 0.0
-
 start_x = 250.0
 start_y = 330.0
 start_height = 150.0
@@ -41,7 +27,7 @@ normal_detail_blend_start = 500.0
 normal_detail_blend_end = 1000.0
 ```
 
-The config is loaded once at startup. Missing keys fall back to the built-in defaults. `worldmap` points at a generated package manifest; see [docs/worldmaps.md](docs/worldmaps.md). Use `present_mode = "immediate"` for raw throughput measurement, `present_mode = "mailbox"` for low-latency no-tear presentation where supported, or `present_mode = "vsync"` for display-paced presentation. Set `max_framerate` above `0.0` to add a CPU-side frame cap. Set `render_debug_visuals = true` to enable cycling terrain debug views with `F3`. Set `raster_cube_enabled = true` to draw the test cube before the upscale pass; its `x/y/height/size` values are in world units. Set `raster_model_enabled = true` with `raster_model_path` pointing at an OBJ file to draw a textured raster model instead; OBJ material textures support PNG diffuse, specular, and normal maps.
+The config is loaded once at startup. Missing keys fall back to the built-in defaults. `worldmap` points at a generated package manifest; see [docs/worldmaps.md](docs/worldmaps.md). Use `present_mode = "immediate"` for raw throughput measurement, `present_mode = "mailbox"` for low-latency no-tear presentation where supported, or `present_mode = "vsync"` for display-paced presentation. Set `max_framerate` above `0.0` to add a CPU-side frame cap. Set `render_debug_visuals = true` to enable cycling terrain debug views with `F3`. Streamed props are authored in the selected worldmap package as catalog and per-tile TOML files, with glTF/GLB model assets referenced by catalog entries.
 
 ## Controls
 

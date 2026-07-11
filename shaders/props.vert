@@ -4,12 +4,12 @@ layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec3 in_normal;
 layout(location = 2) in vec2 in_texcoord;
 layout(location = 3) in vec4 in_tangent;
+layout(location = 4) in vec4 in_model;
+layout(location = 5) in vec4 in_rotation;
 
-layout(set = 1, binding = 0) uniform RasterParams {
+layout(set = 1, binding = 0) uniform PropsParams {
     vec4 camera;
     vec4 render;
-    vec4 model;
-    vec4 rotation;
     vec4 material_diffuse;
     vec4 material_specular;
     vec4 material_flags;
@@ -34,25 +34,21 @@ float perspective_clip_depth(float view_depth) {
     return (far_depth * view_depth - far_depth * near_depth) / (far_depth - near_depth);
 }
 
-vec2 rotate_xz(vec2 value) {
-    return vec2(
-        value.x * rotation.x - value.y * rotation.y,
-        value.x * rotation.y + value.y * rotation.x
-    );
+vec3 rotate_quat(vec3 value, vec4 rotation) {
+    vec3 t = 2.0 * cross(rotation.xyz, value);
+    return value + rotation.w * t + cross(rotation.xyz, t);
 }
 
 vec3 transform_position(vec3 local_position) {
-    vec3 scaled = local_position * model.w;
-    vec2 rotated_xz = rotate_xz(scaled.xz);
-    vec3 model_center = vec3(model.x, model.z, model.y);
+    vec3 scaled = local_position * in_model.w;
+    vec3 rotated = rotate_quat(scaled, in_rotation);
+    vec3 model_center = vec3(in_model.x, in_model.z, in_model.y);
 
-    return model_center + vec3(rotated_xz.x, scaled.y, rotated_xz.y);
+    return model_center + rotated;
 }
 
 vec3 transform_direction(vec3 local_direction) {
-    vec2 rotated_xz = rotate_xz(local_direction.xz);
-
-    return normalize(vec3(rotated_xz.x, local_direction.y, rotated_xz.y));
+    return normalize(rotate_quat(local_direction, in_rotation));
 }
 
 void main() {

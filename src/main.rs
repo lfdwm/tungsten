@@ -1,7 +1,7 @@
 mod camera;
 mod config;
 mod gpu_upload;
-mod raster_model;
+mod props;
 mod renderer;
 mod terrain;
 mod water;
@@ -22,6 +22,7 @@ use camera::{
     update_gravity_camera, write_replay_stats_csv,
 };
 use config::{AppConfig, CONFIG_PATH};
+use props::PropScene;
 use renderer::{DebugVisualMode, OverlayStats, Renderer};
 use sdl3::{
     event::Event,
@@ -152,7 +153,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
     let target_format = gpu.get_swapchain_texture_format(&window);
     let mut terrain_maps = terrain::load_terrain_maps(&gpu, &config)?;
-    let mut renderer = Renderer::new(&gpu, target_format, &config)?;
+    let mut prop_scene = PropScene::load(&gpu, &terrain_maps)?;
+    let mut renderer = Renderer::new(&gpu, target_format)?;
     let mouse = sdl.mouse();
     mouse.set_relative_mouse_mode(&window, true);
     mouse.show_cursor(false);
@@ -287,11 +289,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         terrain_maps.update_tile_cache_for_position(&gpu, camera.x, camera.y)?;
+        prop_scene.update_for_terrain(&gpu, &terrain_maps)?;
 
         let frame_submitted = renderer.render_frame(
             &gpu,
             &window,
             &terrain_maps,
+            &prop_scene,
             &camera,
             &config,
             debug_visual_mode,

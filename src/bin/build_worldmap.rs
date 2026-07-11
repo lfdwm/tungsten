@@ -13,9 +13,9 @@ use meshopt::{
 };
 use tungsten::worldmap::{
     COLOR_FORMAT_RGBA8, COLOR_NEAR_DIR, HEIGHT_FORMAT_R16LE, HEIGHT_NEAR_DIR, MANIFEST_FILE_NAME,
-    WATER_FLOW_DIR, WATER_FLOW_FORMAT_RG8, WATER_MESH_DIR, WATER_MESH_FORMAT_WMESH1, WaterManifest,
-    WorldmapManifest, color_tile_file_name, height_tile_file_name, water_flow_tile_file_name,
-    water_mesh_tile_file_name,
+    PROPS_CATALOG_DIR, PROPS_TILES_DIR, WATER_FLOW_DIR, WATER_FLOW_FORMAT_RG8, WATER_MESH_DIR,
+    WATER_MESH_FORMAT_WMESH1, WaterManifest, WorldmapManifest, color_tile_file_name,
+    height_tile_file_name, water_flow_tile_file_name, water_mesh_tile_file_name,
 };
 
 const R16_BYTES_PER_PIXEL: usize = 2;
@@ -316,11 +316,15 @@ fn build_worldmap(args: &Args) -> Result<WorldmapManifest, Box<dyn Error>> {
         color_far_path,
         color_far_width: u32::try_from(args.far_color_size.width)?,
         color_far_height: u32::try_from(args.far_color_size.height)?,
+        props_catalog_path: PROPS_CATALOG_DIR.to_owned(),
+        props_tiles_path: PROPS_TILES_DIR.to_owned(),
         water: water_manifest,
     }
     .validate()?;
 
     fs::create_dir_all(&args.output)?;
+    fs::create_dir_all(args.output.join(&manifest.props_catalog_path))?;
+    fs::create_dir_all(args.output.join(&manifest.props_tiles_path))?;
     write_height_tiles(&height_bytes, &args.height_size, args, &manifest)?;
     write_color_tiles(color.as_raw(), &args.height_size, args, &manifest)?;
 

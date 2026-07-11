@@ -38,6 +38,19 @@ assets/worldmaps/<world-name>/
       tile_0000_0000.rg8
       tile_0001_0000.rg8
       ...
+  props/
+    catalog/
+      pine_a.toml
+      rock_a.toml
+      ...
+    tiles/
+      tile_0000_0000.toml
+      tile_0001_0000.toml
+      ...
+    assets/
+      pine_a.glb
+      rock_a.glb
+      ...
 ```
 
 ## Manifest
@@ -68,6 +81,9 @@ color_far_path = "color/far/overview_4096.rgba"
 color_far_width = 4096
 color_far_height = 4096
 
+props_catalog_path = "props/catalog"
+props_tiles_path = "props/tiles"
+
 water_source_width = 16384
 water_source_height = 16384
 water_tile_size_x = 1024
@@ -83,6 +99,8 @@ water_ocean_height = 203.939
 `horizontal_scale` converts source pixels to world-space X/Z units. `height_scale` converts normalized R16 samples to world-space height. These are world properties, not renderer config values.
 
 The `water_*` keys are required. Water source dimensions may differ from terrain source dimensions, but they must cover the same world extents and divide evenly by the terrain tile counts.
+
+The `props_catalog_path` and `props_tiles_path` keys are required. They are relative to the worldmap root and are generated as empty directories by `build_worldmap`.
 
 ## Tile Format
 
@@ -109,6 +127,37 @@ indices: little-endian u32
 ```
 
 Water flow tiles are raw RG8 files copied from the source flowmap red/green channels. The renderer loads all non-empty water mesh tiles at startup and renders a generated map-wide ocean plane from `water_ocean_height`; flow data is packaged for later shading work and is not loaded by the current runtime.
+
+## Props
+
+Prop definitions live in `props_catalog_path` as one TOML file per prop type:
+
+```toml
+id = "pine_a"
+model_path = "props/assets/pine_a.glb"
+metadata = { kind = "tree" }
+```
+
+`model_path` is relative to the worldmap root unless it is absolute. Runtime model loading supports glTF 2.0 `.gltf` and `.glb` files through the `gltf` crate.
+
+Prop instances live in `props_tiles_path` using the same `tile_0000_0000.toml` naming as terrain tiles. Missing prop tile files are treated as empty tiles.
+
+```toml
+[[instance]]
+prop = "pine_a"
+source_x = 123.4
+source_y = 812.0
+height_mode = "terrain" # "terrain" or "absolute"
+height = 0.0
+height_offset = 0.0
+pitch = 0.0
+yaw = 1.57
+roll = 0.0
+scale = 1.0
+metadata = { spawn_id = "pine_00231" }
+```
+
+`source_x` and `source_y` are source-pixel coordinates and must belong to the tile file they are authored in. They are converted to world units with `horizontal_scale`. Rotations are radians. `height_mode = "terrain"` samples the resident CPU collision height and adds `height_offset`; `height_mode = "absolute"` uses `height + height_offset`.
 
 ## Far Maps
 
