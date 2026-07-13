@@ -1,6 +1,10 @@
 mod camera;
+mod camera_trace;
 mod config;
+mod game_controls;
 mod gpu_upload;
+mod input;
+mod player;
 mod props;
 mod renderer;
 mod terrain;
@@ -15,20 +19,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use camera::{
-    Camera, CameraMode, CameraRecorder, CameraReplay, CameraTrace, PlayerPhysics, ReplayStats,
-    apply_gravity_wheel_adjustment, enable_gravity_mode, print_camera_recording_summary,
-    print_replay_stats, terrain_full_map_distance, toggle_camera_recording, update_freecam,
-    update_gravity_camera, write_replay_stats_csv,
+use camera::{Camera, terrain_full_map_distance};
+use camera_trace::{
+    CameraReplay, CameraTrace, ReplayStats, print_replay_stats, write_replay_stats_csv,
 };
 use config::{AppConfig, CONFIG_PATH};
+use game_controls::GameControls;
+use input::InputState;
 use props::PropScene;
-use renderer::{DebugVisualMode, OverlayStats, Renderer};
-use sdl3::{
-    event::Event,
-    gpu::{Device, ShaderFormat, SwapchainComposition},
-    keyboard::{Keycode, Scancode},
-};
+use renderer::{OverlayStats, Renderer};
+use sdl3::gpu::{Device, ShaderFormat, SwapchainComposition};
 
 const WINDOW_WIDTH: u32 = 1280;
 const WINDOW_HEIGHT: u32 = 720;
@@ -168,82 +168,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         vertical_fov: 1.05,
         max_distance: terrain_full_map_distance(terrain_maps.terrain_size),
     };
-    let mut camera_mode = CameraMode::Freecam;
-    let mut player_physics = PlayerPhysics::new();
+    let mut game_controls = GameControls::new(config.render_debug_visuals);
     let mut fps_counter = FpsCounter::new();
-    let mut debug_visual_mode = DebugVisualMode::None;
-    let mut camera_recorder: Option<CameraRecorder> = None;
 
     let mut events = sdl.event_pump()?;
+    let mut input_state = InputState::new();
     let mut previous_frame = Instant::now();
 
     'running: loop {
-        let mut mouse_delta = [0.0, 0.0];
-        let mut wheel_delta = 0.0;
-        let mut jump_requested = false;
-        for event in events.poll_iter() {
-            match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => break 'running,
-                Event::MouseMotion { xrel, yrel, .. } if !replay_enabled => {
-                    mouse_delta[0] += xrel;
-                    mouse_delta[1] += yrel;
-                }
-                Event::MouseWheel { y, .. } if !replay_enabled => {
-                    wheel_delta += y;
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::G),
-                    repeat: false,
-                    ..
-                } if !replay_enabled => {
-                    camera_mode = match camera_mode {
-                        CameraMode::Freecam => {
-                            terrain_maps
-                                .update_tile_cache_for_position(&gpu, camera.x, camera.y)?;
-                            enable_gravity_mode(
-                                &mut camera,
-                                &mut player_physics,
-                                terrain_maps.collision_height(),
-                            );
-                            CameraMode::Gravity
-                        }
-                        CameraMode::Gravity => CameraMode::Freecam,
-                    };
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::Space),
-                    repeat: false,
-                    ..
-                } if !replay_enabled => {
-                    jump_requested = true;
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::F3),
-                    repeat: false,
-                    ..
-                } if !replay_enabled => {
-                    if config.render_debug_visuals {
-                        debug_visual_mode = debug_visual_mode.next();
-                        println!(
-                            "debug visuals: {}\n{}",
-                            debug_visual_mode.label(),
-                            debug_visual_mode.color_key()
-                        );
-                    }
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::F11),
-                    repeat: false,
-                    ..
-                } if !replay_enabled => {
-                    toggle_camera_recording(&mut camera_recorder, &camera)?;
-                }
-                _ => {}
-            }
+        let input = input_state.poll(&mut events, !replay_enabled);
+        if input.quit_requested() {
+            break 'running;
         }
 
         let now = Instant::now();
@@ -257,35 +192,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 break 'running;
             }
         } else {
-            if camera_mode == CameraMode::Gravity {
-                terrain_maps.update_tile_cache_for_position(&gpu, camera.x, camera.y)?;
-            }
-            if camera_mode == CameraMode::Gravity && wheel_delta != 0.0 {
-                let keyboard = events.keyboard_state();
-                let adjust_move_speed = keyboard.is_scancode_pressed(Scancode::LShift)
-                    || keyboard.is_scancode_pressed(Scancode::RShift);
-                apply_gravity_wheel_adjustment(
-                    &mut camera,
-                    &mut player_physics,
-                    terrain_maps.collision_height(),
-                    wheel_delta,
-                    adjust_move_speed,
-                );
-            }
-            match camera_mode {
-                CameraMode::Freecam => {
-                    update_freecam(&events, &mut camera, dt.as_secs_f32(), mouse_delta)
-                }
-                CameraMode::Gravity => update_gravity_camera(
-                    &events,
-                    &mut camera,
-                    &mut player_physics,
-                    terrain_maps.collision_height(),
-                    dt.as_secs_f32(),
-                    mouse_delta,
-                    jump_requested,
-                ),
-            }
+            game_controls.update(
+                &input,
+                &gpu,
+                &mut terrain_maps,
+                &mut camera,
+                dt.as_secs_f32(),
+            )?;
         }
 
         terrain_maps.update_tile_cache_for_position(&gpu, camera.x, camera.y)?;
@@ -298,7 +211,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             &prop_scene,
             &camera,
             &config,
-            debug_visual_mode,
+            game_controls.debug_visual_mode(),
             fps_counter.overlay_stats(),
         )?;
 
@@ -306,9 +219,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         limit_framerate(now, config.max_framerate);
 
         if frame_submitted {
-            if let Some(active_recorder) = camera_recorder.as_mut() {
-                active_recorder.update_after_submitted_frame(&camera)?;
-            }
+            game_controls.update_after_submitted_frame(&camera)?;
             if let Some(active_replay) = replay.as_mut() {
                 if let Some(stats) = replay_stats.as_mut() {
                     stats.record_frame(active_replay.current_frame(), now.elapsed());
@@ -321,9 +232,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if let Some(active_recorder) = camera_recorder.take() {
-        print_camera_recording_summary(active_recorder.finish()?);
-    }
+    game_controls.finish_recording()?;
     if replay_completed {
         if let Some(stats) = replay_stats.as_ref() {
             print_replay_stats(stats);
