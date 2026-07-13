@@ -15,6 +15,7 @@ use sdl3::gpu::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    camera::CameraRay,
     gpu_upload::{create_buffer_with_data, create_texture_2d_with_pixels},
     terrain::{HeightField, TerrainMaps},
     worldmap::WorldmapManifest,
@@ -36,6 +37,19 @@ pub struct PropVertex {
 pub struct PropInstanceGpu {
     pub model: [f32; 4],
     pub rotation: [f32; 4],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PropBounds {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PropTransform {
+    pub position: Vec3,
+    pub rotation: Quat,
+    pub scale: f32,
 }
 
 pub struct PropScene {
@@ -164,10 +178,76 @@ pub enum PropHeightMode {
     Absolute,
 }
 
+impl PropBounds {
+    pub fn corners(self) -> [Vec3; 8] {
+        let min = Vec3::from_array(self.min);
+        let max = Vec3::from_array(self.max);
+        [
+            Vec3::new(min.x, min.y, min.z),
+            Vec3::new(max.x, min.y, min.z),
+            Vec3::new(max.x, max.y, min.z),
+            Vec3::new(min.x, max.y, min.z),
+            Vec3::new(min.x, min.y, max.z),
+            Vec3::new(max.x, min.y, max.z),
+            Vec3::new(max.x, max.y, max.z),
+            Vec3::new(min.x, max.y, max.z),
+        ]
+    }
+}
+
+impl PropTransform {
+    pub fn local_to_world(self, local: Vec3) -> Vec3 {
+        self.position + self.rotation * (local * self.scale)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PropBoundsBuilder {
+    min: Vec3,
+    max: Vec3,
+    has_points: bool,
+}
+
+impl PropBoundsBuilder {
+    fn empty() -> Self {
+        Self {
+            min: Vec3::splat(f32::INFINITY),
+            max: Vec3::splat(f32::NEG_INFINITY),
+            has_points: false,
+        }
+    }
+
+    fn include_point(&mut self, point: Vec3) {
+        self.min = self.min.min(point);
+        self.max = self.max.max(point);
+        self.has_points = true;
+    }
+
+    fn include_bounds(&mut self, bounds: PropBounds) {
+        self.include_point(Vec3::from_array(bounds.min));
+        self.include_point(Vec3::from_array(bounds.max));
+    }
+
+    fn build(self) -> PropBounds {
+        if self.has_points {
+            PropBounds {
+                min: self.min.to_array(),
+                max: self.max.to_array(),
+            }
+        } else {
+            PropBounds {
+                min: Vec3::ZERO.to_array(),
+                max: Vec3::ZERO.to_array(),
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PropModelCpu {
     meshes: Vec<PropMeshCpu>,
     materials: Vec<PropMaterialCpu>,
+    bounds: PropBounds,
 }
 
 #[derive(Clone, Debug)]
@@ -175,6 +255,7 @@ struct PropMeshCpu {
     vertices: Vec<PropVertex>,
     indices: Vec<u32>,
     material_index: usize,
+    bounds: PropBounds,
 }
 
 #[derive(Clone, Debug)]
@@ -196,6 +277,7 @@ struct PropTextureCpu {
 pub struct PropModelGpu {
     pub meshes: Vec<PropMeshGpu>,
     pub materials: Vec<PropMaterialGpu>,
+    pub bounds: PropBounds,
 }
 
 pub struct PropMeshGpu {
@@ -648,8 +730,16 @@ impl PropModelCpu {
         if meshes.is_empty() {
             return Err(format!("{} did not contain any triangle meshes", path.display()).into());
         }
+        let mut bounds = PropBoundsBuilder::empty();
+        for mesh in &meshes {
+            bounds.include_bounds(mesh.bounds);
+        }
 
-        Ok(Self { meshes, materials })
+        Ok(Self {
+            meshes,
+            materials,
+            bounds: bounds.build(),
+        })
     }
 }
 
@@ -716,7 +806,11 @@ impl PropModelGpu {
         gpu.end_copy_pass(copy_pass);
         copy_commands.submit()?;
 
-        Ok(Self { meshes, materials })
+        Ok(Self {
+            meshes,
+            materials,
+            bounds: cpu.bounds,
+        })
     }
 }
 
@@ -833,6 +927,83 @@ pub fn source_position_from_world(
     ]
 }
 
+pub fn prop_transform(
+    instance: &PropInstanceToml,
+    manifest: &WorldmapManifest,
+    height_field: &HeightField,
+) -> PropTransform {
+    let world_x = instance.source_x * manifest.horizontal_scale;
+    let world_y = instance.source_y * manifest.horizontal_scale;
+    let base_height = match instance.height_mode {
+        PropHeightMode::Terrain => height_field.height_at(world_x, world_y),
+        PropHeightMode::Absolute => instance.height,
+    };
+    let rotation = (Quat::from_rotation_y(instance.yaw)
+        * Quat::from_rotation_x(instance.pitch)
+        * Quat::from_rotation_z(instance.roll))
+    .normalize();
+
+    PropTransform {
+        position: Vec3::new(world_x, base_height + instance.height_offset, world_y),
+        rotation,
+        scale: instance.scale,
+    }
+}
+
+pub fn prop_bounds_world_corners(transform: PropTransform, bounds: PropBounds) -> [Vec3; 8] {
+    bounds
+        .corners()
+        .map(|corner| transform.local_to_world(corner))
+}
+
+pub fn raycast_prop_bounds(
+    ray: CameraRay,
+    transform: PropTransform,
+    bounds: PropBounds,
+) -> Option<f32> {
+    let inverse_rotation = transform.rotation.conjugate();
+    let inverse_scale = transform.scale.max(0.000001).recip();
+    let origin = inverse_rotation * (ray.origin - transform.position) * inverse_scale;
+    let direction = inverse_rotation * ray.direction * inverse_scale;
+    let min = Vec3::from_array(bounds.min);
+    let max = Vec3::from_array(bounds.max);
+    let mut t_min = f32::NEG_INFINITY;
+    let mut t_max = f32::INFINITY;
+
+    for axis in 0..3 {
+        let origin_axis = origin[axis];
+        let direction_axis = direction[axis];
+        let min_axis = min[axis];
+        let max_axis = max[axis];
+
+        if direction_axis.abs() <= 0.000001 {
+            if origin_axis < min_axis || origin_axis > max_axis {
+                return None;
+            }
+            continue;
+        }
+
+        let mut t0 = (min_axis - origin_axis) / direction_axis;
+        let mut t1 = (max_axis - origin_axis) / direction_axis;
+        if t0 > t1 {
+            std::mem::swap(&mut t0, &mut t1);
+        }
+        t_min = t_min.max(t0);
+        t_max = t_max.min(t1);
+        if t_min > t_max {
+            return None;
+        }
+    }
+
+    if t_min >= 0.0 {
+        Some(t_min)
+    } else if t_max >= 0.0 {
+        Some(t_max)
+    } else {
+        None
+    }
+}
+
 fn upload_instance_groups(
     gpu: &Device,
     grouped_instances: BTreeMap<PathBuf, Vec<PropInstanceGpu>>,
@@ -922,25 +1093,16 @@ fn prop_instance_gpu(
     manifest: &WorldmapManifest,
     height_field: &HeightField,
 ) -> PropInstanceGpu {
-    let world_x = instance.source_x * manifest.horizontal_scale;
-    let world_y = instance.source_y * manifest.horizontal_scale;
-    let base_height = match instance.height_mode {
-        PropHeightMode::Terrain => height_field.height_at(world_x, world_y),
-        PropHeightMode::Absolute => instance.height,
-    };
-    let rotation = (Quat::from_rotation_y(instance.yaw)
-        * Quat::from_rotation_x(instance.pitch)
-        * Quat::from_rotation_z(instance.roll))
-    .normalize();
+    let transform = prop_transform(instance, manifest, height_field);
 
     PropInstanceGpu {
         model: [
-            world_x,
-            world_y,
-            base_height + instance.height_offset,
-            instance.scale,
+            transform.position.x,
+            transform.position.z,
+            transform.position.y,
+            transform.scale,
         ],
-        rotation: rotation.to_array(),
+        rotation: transform.rotation.to_array(),
     }
 }
 
@@ -1032,10 +1194,10 @@ fn load_primitive(
     }
 
     let mut vertices = Vec::with_capacity(vertex_count);
+    let mut bounds = PropBoundsBuilder::empty();
     for index in 0..vertex_count {
-        let position = transform
-            .transform_point3(Vec3::from_array(positions[index]))
-            .to_array();
+        let position = transform.transform_point3(Vec3::from_array(positions[index]));
+        bounds.include_point(position);
         let normal = normals
             .as_ref()
             .map(|values| {
@@ -1066,7 +1228,7 @@ fn load_primitive(
             .unwrap_or([1.0, 0.0, 0.0, 1.0]);
 
         vertices.push(PropVertex {
-            position,
+            position: position.to_array(),
             normal,
             texcoord,
             tangent,
@@ -1090,6 +1252,7 @@ fn load_primitive(
             .index()
             .map(|index| index + 1)
             .unwrap_or(0),
+        bounds: bounds.build(),
     })
 }
 
@@ -1430,7 +1593,37 @@ metadata = { spawn_id = "pine_1" }
         assert_eq!(model.meshes[0].vertices.len(), 3);
         assert_eq!(model.meshes[0].indices, vec![0, 1, 2]);
         assert_eq!(model.materials.len(), 1);
+        assert_eq!(model.bounds.min, [0.0, 0.0, 0.0]);
+        assert_eq!(model.bounds.max, [1.0, 1.0, 0.0]);
+        assert_eq!(model.meshes[0].bounds, model.bounds);
         assert_ne!(model.meshes[0].vertices[0].normal, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn raycasts_transformed_prop_bounds() {
+        let bounds = PropBounds {
+            min: [-1.0, -1.0, -1.0],
+            max: [1.0, 1.0, 1.0],
+        };
+        let transform = PropTransform {
+            position: Vec3::new(2.0, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: 2.0,
+        };
+        let hit_ray = CameraRay {
+            origin: Vec3::new(2.0, 0.0, -8.0),
+            direction: Vec3::Z,
+        };
+        let miss_ray = CameraRay {
+            origin: Vec3::new(8.0, 0.0, -8.0),
+            direction: Vec3::Z,
+        };
+
+        assert_eq!(
+            raycast_prop_bounds(hit_ray, transform, bounds).unwrap(),
+            6.0
+        );
+        assert_eq!(raycast_prop_bounds(miss_ray, transform, bounds), None);
     }
 
     #[test]

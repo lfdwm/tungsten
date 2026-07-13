@@ -25,6 +25,8 @@ impl InputState {
 
         if controls_enabled {
             input.set_held_scancodes(events.keyboard_state().pressed_scancodes());
+            let mouse_state = events.mouse_state();
+            input.mouse_position = Some([mouse_state.x(), mouse_state.y()]);
         }
         input.set_held_mouse_buttons(self.held_mouse_buttons.iter().copied());
 

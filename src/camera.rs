@@ -61,3 +61,54 @@ pub fn camera_screen_ray(
         direction,
     }
 }
+
+pub fn camera_project_world_to_screen(
+    camera: &Camera,
+    width: u32,
+    height: u32,
+    world_pos: Vec3,
+) -> Option<[f32; 2]> {
+    let basis = camera_ray_basis(camera, width, height);
+    let origin = Vec3::new(camera.x, camera.height, camera.y);
+    let delta = world_pos - origin;
+    let view_depth = delta.dot(basis.forward);
+    if view_depth <= 0.001 {
+        return None;
+    }
+
+    let right_len_sq = basis.right_scaled.length_squared().max(0.0001);
+    let up_len_sq = basis.up_scaled.length_squared().max(0.0001);
+    let clip_x = delta.dot(basis.right_scaled) / (view_depth * right_len_sq);
+    let clip_y = delta.dot(basis.up_scaled) / (view_depth * up_len_sq);
+
+    Some([
+        (clip_x + 1.0) * 0.5 * width as f32,
+        (1.0 - clip_y) * 0.5 * height as f32,
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projects_screen_ray_points_back_to_screen() {
+        let camera = Camera {
+            x: 4.0,
+            y: 8.0,
+            height: 20.0,
+            yaw: 0.4,
+            pitch: -0.2,
+            vertical_fov: 1.05,
+            max_distance: 1000.0,
+        };
+        let screen_pos = [830.0, 290.0];
+        let ray = camera_screen_ray(&camera, 1280, 720, screen_pos);
+        let world_pos = ray.origin + ray.direction * 150.0;
+
+        let projected = camera_project_world_to_screen(&camera, 1280, 720, world_pos).unwrap();
+
+        assert!((projected[0] - screen_pos[0]).abs() < 0.01);
+        assert!((projected[1] - screen_pos[1]).abs() < 0.01);
+    }
+}
