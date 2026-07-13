@@ -1,8 +1,10 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     error::Error,
     fs,
     path::{Path, PathBuf},
+    sync::mpsc,
+    thread,
 };
 
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
@@ -41,7 +43,9 @@ pub(crate) struct PropScene {
     worldmap_dir: PathBuf,
     active_window_min: [u32; 2],
     active_window_max: [u32; 2],
-    models: HashMap<PathBuf, PropModelGpu>,
+    models: HashMap<PathBuf, PropModelState>,
+    loader: PropModelLoader,
+    pending_uploads: VecDeque<PendingPropModelUpload>,
     draw_groups: Vec<PropDrawGroup>,
 }
 
@@ -49,6 +53,58 @@ pub(crate) struct PropDrawGroup {
     pub(crate) model_path: PathBuf,
     pub(crate) instance_buffer: Buffer,
     pub(crate) instance_count: u32,
+}
+
+enum PropModelState {
+    Ready(PropModelGpu),
+    Loading,
+    Failed,
+}
+
+struct PropModelLoader {
+    request_sender: mpsc::Sender<PathBuf>,
+    result_receiver: mpsc::Receiver<PropModelLoadResult>,
+    _worker_thread: thread::JoinHandle<()>,
+}
+
+struct PropModelLoadResult {
+    path: PathBuf,
+    result: Result<PropModelCpu, String>,
+}
+
+struct PendingPropModelUpload {
+    path: PathBuf,
+    cpu_model: PropModelCpu,
+}
+
+impl PropModelLoader {
+    fn spawn() -> Result<Self, Box<dyn Error>> {
+        let (request_sender, request_receiver) = mpsc::channel::<PathBuf>();
+        let (result_sender, result_receiver) = mpsc::channel::<PropModelLoadResult>();
+        let worker_thread = thread::Builder::new()
+            .name("tungsten-prop-loader".to_owned())
+            .spawn(move || {
+                while let Ok(path) = request_receiver.recv() {
+                    let result = PropModelCpu::load_gltf(&path).map_err(|error| error.to_string());
+                    if result_sender
+                        .send(PropModelLoadResult { path, result })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })?;
+
+        Ok(Self {
+            request_sender,
+            result_receiver,
+            _worker_thread: worker_thread,
+        })
+    }
+
+    fn request(&self, path: PathBuf) -> Result<(), mpsc::SendError<PathBuf>> {
+        self.request_sender.send(path)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -159,15 +215,18 @@ impl PropScene {
             &terrain.manifest.props_catalog_dir(&terrain.worldmap_dir),
             &terrain.worldmap_dir,
         )?;
+        let loader = PropModelLoader::spawn()?;
         let mut scene = Self {
             catalog,
             worldmap_dir: terrain.worldmap_dir.clone(),
             active_window_min: [u32::MAX, u32::MAX],
             active_window_max: [u32::MAX, u32::MAX],
             models: HashMap::new(),
+            loader,
+            pending_uploads: VecDeque::new(),
             draw_groups: Vec::new(),
         };
-        scene.update_for_terrain(gpu, terrain)?;
+        scene.load_initial_window(gpu, terrain)?;
 
         Ok(scene)
     }
@@ -177,25 +236,18 @@ impl PropScene {
         gpu: &Device,
         terrain: &TerrainMaps,
     ) -> Result<(), Box<dyn Error>> {
+        self.drain_completed_model_loads();
+        self.upload_one_pending_model(gpu);
+
         if self.active_window_min == terrain.current_window_min
             && self.active_window_max == terrain.current_window_max
         {
             return Ok(());
         }
 
-        let mut grouped_instances = BTreeMap::<PathBuf, Vec<PropInstanceGpu>>::new();
-        for tile_y in terrain.current_window_min[1]..=terrain.current_window_max[1] {
-            for tile_x in terrain.current_window_min[0]..=terrain.current_window_max[0] {
-                self.load_tile_instances(terrain, tile_x, tile_y, &mut grouped_instances)?;
-            }
-        }
-
+        let grouped_instances = self.active_instances(terrain)?;
         for model_path in grouped_instances.keys() {
-            if !self.models.contains_key(model_path) {
-                let cpu_model = PropModelCpu::load_gltf(model_path)?;
-                let gpu_model = PropModelGpu::upload(gpu, &cpu_model)?;
-                self.models.insert(model_path.clone(), gpu_model);
-            }
+            self.request_model_if_needed(model_path)?;
         }
 
         self.draw_groups = upload_instance_groups(gpu, grouped_instances)?;
@@ -210,7 +262,124 @@ impl PropScene {
     }
 
     pub(crate) fn model(&self, path: &Path) -> Option<&PropModelGpu> {
-        self.models.get(path)
+        match self.models.get(path) {
+            Some(PropModelState::Ready(model)) => Some(model),
+            Some(PropModelState::Loading | PropModelState::Failed) | None => None,
+        }
+    }
+
+    fn load_initial_window(
+        &mut self,
+        gpu: &Device,
+        terrain: &TerrainMaps,
+    ) -> Result<(), Box<dyn Error>> {
+        let grouped_instances = self.active_instances(terrain)?;
+        for model_path in grouped_instances.keys() {
+            self.load_model_synchronously(gpu, model_path);
+        }
+
+        self.draw_groups = upload_instance_groups(gpu, grouped_instances)?;
+        self.active_window_min = terrain.current_window_min;
+        self.active_window_max = terrain.current_window_max;
+
+        Ok(())
+    }
+
+    fn active_instances(
+        &self,
+        terrain: &TerrainMaps,
+    ) -> Result<BTreeMap<PathBuf, Vec<PropInstanceGpu>>, Box<dyn Error>> {
+        let mut grouped_instances = BTreeMap::<PathBuf, Vec<PropInstanceGpu>>::new();
+        for tile_y in terrain.current_window_min[1]..=terrain.current_window_max[1] {
+            for tile_x in terrain.current_window_min[0]..=terrain.current_window_max[0] {
+                self.load_tile_instances(terrain, tile_x, tile_y, &mut grouped_instances)?;
+            }
+        }
+
+        Ok(grouped_instances)
+    }
+
+    fn load_model_synchronously(&mut self, gpu: &Device, model_path: &Path) {
+        if self.models.contains_key(model_path) {
+            return;
+        }
+
+        match PropModelCpu::load_gltf(model_path) {
+            Ok(cpu_model) => match PropModelGpu::upload(gpu, &cpu_model) {
+                Ok(gpu_model) => {
+                    self.models
+                        .insert(model_path.to_path_buf(), PropModelState::Ready(gpu_model));
+                }
+                Err(error) => {
+                    eprintln!(
+                        "failed to upload prop model {}: {error}",
+                        model_path.display()
+                    );
+                    self.models
+                        .insert(model_path.to_path_buf(), PropModelState::Failed);
+                }
+            },
+            Err(error) => {
+                eprintln!(
+                    "failed to load prop model {}: {error}",
+                    model_path.display()
+                );
+                self.models
+                    .insert(model_path.to_path_buf(), PropModelState::Failed);
+            }
+        }
+    }
+
+    fn request_model_if_needed(&mut self, model_path: &Path) -> Result<(), Box<dyn Error>> {
+        if self.models.contains_key(model_path) {
+            return Ok(());
+        }
+
+        self.loader
+            .request(model_path.to_path_buf())
+            .map_err(|_| "prop loader worker stopped unexpectedly")?;
+        self.models
+            .insert(model_path.to_path_buf(), PropModelState::Loading);
+
+        Ok(())
+    }
+
+    fn drain_completed_model_loads(&mut self) {
+        while let Ok(result) = self.loader.result_receiver.try_recv() {
+            match result.result {
+                Ok(cpu_model) => self.pending_uploads.push_back(PendingPropModelUpload {
+                    path: result.path,
+                    cpu_model,
+                }),
+                Err(error) => {
+                    eprintln!(
+                        "failed to load prop model {}: {error}",
+                        result.path.display()
+                    );
+                    self.models.insert(result.path, PropModelState::Failed);
+                }
+            }
+        }
+    }
+
+    fn upload_one_pending_model(&mut self, gpu: &Device) {
+        let Some(pending) = self.pending_uploads.pop_front() else {
+            return;
+        };
+
+        match PropModelGpu::upload(gpu, &pending.cpu_model) {
+            Ok(gpu_model) => {
+                self.models
+                    .insert(pending.path, PropModelState::Ready(gpu_model));
+            }
+            Err(error) => {
+                eprintln!(
+                    "failed to upload prop model {}: {error}",
+                    pending.path.display()
+                );
+                self.models.insert(pending.path, PropModelState::Failed);
+            }
+        }
     }
 
     fn load_tile_instances(
@@ -498,8 +667,8 @@ impl PropMaterialGpu {
 pub(crate) fn create_prop_sampler(gpu: &Device) -> Result<Sampler, Box<dyn Error>> {
     Ok(gpu.create_sampler(
         SamplerCreateInfo::new()
-            .with_min_filter(Filter::Linear)
-            .with_mag_filter(Filter::Linear)
+            .with_min_filter(Filter::Nearest)
+            .with_mag_filter(Filter::Nearest)
             .with_mipmap_mode(SamplerMipmapMode::Nearest)
             .with_address_mode_u(SamplerAddressMode::Repeat)
             .with_address_mode_v(SamplerAddressMode::Repeat)
@@ -1034,7 +1203,7 @@ fn normalize_or(value: Vec3, fallback: Vec3) -> Vec3 {
 mod tests {
     use std::{
         fs,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use super::*;
@@ -1096,6 +1265,77 @@ metadata = { spawn_id = "pine_1" }
     #[test]
     fn loads_minimal_gltf_mesh() {
         let dir = test_dir("loads_minimal_gltf_mesh");
+        let path = write_minimal_gltf(&dir);
+
+        let model = PropModelCpu::load_gltf(&path).unwrap();
+
+        assert_eq!(model.meshes.len(), 1);
+        assert_eq!(model.meshes[0].vertices.len(), 3);
+        assert_eq!(model.meshes[0].indices, vec![0, 1, 2]);
+        assert_eq!(model.materials.len(), 1);
+        assert_ne!(model.meshes[0].vertices[0].normal, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn worker_loads_requested_model() {
+        let dir = test_dir("worker_loads_requested_model");
+        let path = write_minimal_gltf(&dir);
+        let loader = PropModelLoader::spawn().unwrap();
+
+        loader.request(path.clone()).unwrap();
+        let result = loader
+            .result_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        assert_eq!(result.path, path);
+        assert_eq!(result.result.unwrap().meshes.len(), 1);
+    }
+
+    #[test]
+    fn worker_reports_load_errors() {
+        let dir = test_dir("worker_reports_load_errors");
+        let path = dir.join("missing.gltf");
+        let loader = PropModelLoader::spawn().unwrap();
+
+        loader.request(path.clone()).unwrap();
+        let result = loader
+            .result_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        assert_eq!(result.path, path);
+        assert!(result.result.unwrap_err().contains("failed to import"));
+    }
+
+    #[test]
+    fn scheduling_marks_model_loading_once() {
+        let dir = test_dir("scheduling_marks_model_loading_once");
+        let model_path = dir.join("missing.gltf");
+        let loader = PropModelLoader::spawn().unwrap();
+        let mut scene = PropScene {
+            catalog: PropCatalog {
+                definitions: HashMap::new(),
+            },
+            worldmap_dir: dir,
+            active_window_min: [u32::MAX, u32::MAX],
+            active_window_max: [u32::MAX, u32::MAX],
+            models: HashMap::new(),
+            loader,
+            pending_uploads: VecDeque::new(),
+            draw_groups: Vec::new(),
+        };
+
+        scene.request_model_if_needed(&model_path).unwrap();
+        scene.request_model_if_needed(&model_path).unwrap();
+
+        assert!(matches!(
+            scene.models.get(&model_path),
+            Some(PropModelState::Loading)
+        ));
+    }
+
+    fn write_minimal_gltf(dir: &Path) -> PathBuf {
         let mut buffer = Vec::new();
         for value in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
             buffer.extend_from_slice(&value.to_le_bytes());
@@ -1128,13 +1368,7 @@ metadata = { spawn_id = "pine_1" }
         )
         .unwrap();
 
-        let model = PropModelCpu::load_gltf(&dir.join("tri.gltf")).unwrap();
-
-        assert_eq!(model.meshes.len(), 1);
-        assert_eq!(model.meshes[0].vertices.len(), 3);
-        assert_eq!(model.meshes[0].indices, vec![0, 1, 2]);
-        assert_eq!(model.materials.len(), 1);
-        assert_ne!(model.meshes[0].vertices[0].normal, [0.0, 0.0, 0.0]);
+        dir.join("tri.gltf")
     }
 
     fn test_dir(name: &str) -> PathBuf {
