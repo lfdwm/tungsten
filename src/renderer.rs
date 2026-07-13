@@ -4,19 +4,20 @@ use glam::Vec3;
 use sdl3::{
     gpu::{
         BlendFactor, BlendOp, BufferBinding, ColorTargetBlendState, ColorTargetDescription,
-        ColorTargetInfo, CompareOp, CullMode, DepthStencilState, DepthStencilTargetInfo, Device,
-        FillMode, Filter, GraphicsPipeline, GraphicsPipelineTargetInfo, IndexElementSize, LoadOp,
-        PrimitiveType, RasterizerState, Sampler, SamplerAddressMode, SamplerCreateInfo,
-        SamplerMipmapMode, ShaderFormat, ShaderStage, StoreOp, Texture, TextureCreateInfo,
-        TextureFormat, TextureSamplerBinding, TextureType, TextureUsage, VertexAttribute,
-        VertexBufferDescription, VertexElementFormat, VertexInputRate, VertexInputState,
+        ColorTargetInfo, CommandBuffer, CompareOp, CullMode, DepthStencilState,
+        DepthStencilTargetInfo, Device, FillMode, Filter, GraphicsPipeline,
+        GraphicsPipelineTargetInfo, IndexElementSize, LoadOp, PrimitiveType, RasterizerState,
+        Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode, ShaderFormat,
+        ShaderStage, StoreOp, Texture, TextureCreateInfo, TextureFormat, TextureSamplerBinding,
+        TextureType, TextureUsage, VertexAttribute, VertexBufferDescription, VertexElementFormat,
+        VertexInputRate, VertexInputState,
     },
     pixels::Color,
     video::Window,
 };
 
 use crate::{
-    camera::Camera,
+    camera::{Camera, camera_ray_basis},
     config::AppConfig,
     props::{PropInstanceGpu, PropScene, PropVertex, create_prop_sampler},
     terrain::TerrainMaps,
@@ -86,7 +87,7 @@ struct RenderTarget {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DebugVisualMode {
+pub enum DebugVisualMode {
     None,
     HeightSources,
     HitMethods,
@@ -95,7 +96,7 @@ pub(crate) enum DebugVisualMode {
 }
 
 impl DebugVisualMode {
-    pub(crate) fn next(self) -> Self {
+    pub fn next(self) -> Self {
         match self {
             Self::None => Self::HeightSources,
             Self::HeightSources => Self::HitMethods,
@@ -105,7 +106,7 @@ impl DebugVisualMode {
         }
     }
 
-    pub(crate) fn as_shader_value(self) -> f32 {
+    pub fn as_shader_value(self) -> f32 {
         match self {
             Self::None => 0.0,
             Self::HeightSources => 1.0,
@@ -115,7 +116,7 @@ impl DebugVisualMode {
         }
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::HeightSources => "height sources",
@@ -125,7 +126,7 @@ impl DebugVisualMode {
         }
     }
 
-    pub(crate) fn color_key(self) -> &'static str {
+    pub fn color_key(self) -> &'static str {
         match self {
             Self::None => "  no debug colors",
             Self::HeightSources => {
@@ -143,12 +144,12 @@ impl DebugVisualMode {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct OverlayStats {
-    pub(crate) fps: f32,
-    pub(crate) frame_ms: f32,
+pub struct OverlayStats {
+    pub fps: f32,
+    pub frame_ms: f32,
 }
 
-pub(crate) struct Renderer {
+pub struct Renderer {
     terrain_pipeline: GraphicsPipeline,
     water_pipeline: GraphicsPipeline,
     props_pipeline: GraphicsPipeline,
@@ -160,7 +161,7 @@ pub(crate) struct Renderer {
 }
 
 impl Renderer {
-    pub(crate) fn new(gpu: &Device, target_format: TextureFormat) -> Result<Self, Box<dyn Error>> {
+    pub fn new(gpu: &Device, target_format: TextureFormat) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             terrain_pipeline: create_terrain_pipeline(gpu, target_format)?,
             water_pipeline: create_water_pipeline(gpu, target_format)?,
@@ -173,7 +174,7 @@ impl Renderer {
         })
     }
 
-    pub(crate) fn render_frame(
+    pub fn render_frame(
         &mut self,
         gpu: &Device,
         window: &Window,
@@ -184,6 +185,34 @@ impl Renderer {
         debug_visual_mode: DebugVisualMode,
         overlay: OverlayStats,
     ) -> Result<bool, Box<dyn Error>> {
+        self.render_frame_with_overlay(
+            gpu,
+            window,
+            terrain_maps,
+            props,
+            camera,
+            config,
+            debug_visual_mode,
+            overlay,
+            |_, _, _| Ok(()),
+        )
+    }
+
+    pub fn render_frame_with_overlay<F>(
+        &mut self,
+        gpu: &Device,
+        window: &Window,
+        terrain_maps: &TerrainMaps,
+        props: &PropScene,
+        camera: &Camera,
+        config: &AppConfig,
+        debug_visual_mode: DebugVisualMode,
+        overlay: OverlayStats,
+        mut overlay_draw: F,
+    ) -> Result<bool, Box<dyn Error>>
+    where
+        F: FnMut(&Device, &CommandBuffer, &Texture<'_>) -> Result<(), Box<dyn Error>>,
+    {
         let (window_width, window_height) = window.size();
         ensure_render_target(
             gpu,
@@ -396,6 +425,7 @@ impl Renderer {
             gpu.end_render_pass(props_pass);
         }
 
+        let command_buffer_ref = std::ptr::addr_of!(command_buffer);
         if let Ok(swapchain) = command_buffer.wait_and_acquire_swapchain_texture(window) {
             let upscale_params = upscale_params(
                 overlay,
@@ -409,7 +439,12 @@ impl Renderer {
                 .with_store_op(StoreOp::STORE)
                 .with_clear_color(Color::RGB(105, 136, 157))];
 
-            let upscale_pass = gpu.begin_render_pass(&command_buffer, &color_targets, None)?;
+            // SDL ties the swapchain texture lifetime to a mutable command-buffer borrow.
+            // The command buffer is still valid for subsequent pass commands while the
+            // acquired texture is used as the render target.
+            let command_buffer_after_acquire = unsafe { &*command_buffer_ref };
+            let upscale_pass =
+                gpu.begin_render_pass(command_buffer_after_acquire, &color_targets, None)?;
             upscale_pass.bind_graphics_pipeline(&self.upscale_pipeline);
             upscale_pass.bind_fragment_samplers(
                 0,
@@ -422,9 +457,11 @@ impl Renderer {
                         .with_sampler(&self.upscale_sampler),
                 ],
             );
-            command_buffer.push_fragment_uniform_data(0, &upscale_params);
+            command_buffer_after_acquire.push_fragment_uniform_data(0, &upscale_params);
             upscale_pass.draw_primitives(3, 1, 0, 0);
             gpu.end_render_pass(upscale_pass);
+
+            overlay_draw(gpu, command_buffer_after_acquire, &swapchain)?;
 
             command_buffer.submit()?;
             Ok(true)
@@ -936,29 +973,6 @@ fn shader_params(
         ray_forward: vec3_param(ray_basis.forward),
         ray_right: vec3_param(ray_basis.right_scaled),
         ray_up: vec3_param(ray_basis.up_scaled),
-    }
-}
-
-struct RayBasis {
-    forward: Vec3,
-    right_scaled: Vec3,
-    up_scaled: Vec3,
-}
-
-fn camera_ray_basis(camera: &Camera, width: u32, height: u32) -> RayBasis {
-    let (sin_yaw, cos_yaw) = camera.yaw.sin_cos();
-    let (sin_pitch, cos_pitch) = camera.pitch.sin_cos();
-    let forward_flat = Vec3::new(sin_yaw, 0.0, -cos_yaw);
-    let right = Vec3::new(cos_yaw, 0.0, sin_yaw);
-    let forward = (forward_flat * cos_pitch + Vec3::Y * sin_pitch).normalize();
-    let up = (Vec3::Y * cos_pitch - forward_flat * sin_pitch).normalize();
-    let aspect = width as f32 / (height as f32).max(1.0);
-    let tan_half_fov = (camera.vertical_fov * 0.5).tan();
-
-    RayBasis {
-        forward,
-        right_scaled: right * aspect * tan_half_fov,
-        up_scaled: up * tan_half_fov,
     }
 }
 

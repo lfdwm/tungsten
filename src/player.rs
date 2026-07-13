@@ -17,7 +17,7 @@ const PLAYER_MAX_FALL_SPEED: f32 = 260.0;
 const PLAYER_GROUND_SNAP: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CameraMode {
+pub enum CameraMode {
     Freecam,
     Gravity,
 }
@@ -40,28 +40,28 @@ impl PlayerPhysics {
     }
 }
 
-pub(crate) struct PlayerController {
+pub struct PlayerController {
     mode: CameraMode,
     physics: PlayerPhysics,
 }
 
 impl PlayerController {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             mode: CameraMode::Freecam,
             physics: PlayerPhysics::new(),
         }
     }
 
-    pub(crate) fn mode(&self) -> CameraMode {
+    pub fn mode(&self) -> CameraMode {
         self.mode
     }
 
-    pub(crate) fn is_gravity_mode(&self) -> bool {
+    pub fn is_gravity_mode(&self) -> bool {
         self.mode == CameraMode::Gravity
     }
 
-    pub(crate) fn toggle_mode(&mut self, camera: &mut Camera, terrain_height: f32) {
+    pub fn toggle_mode(&mut self, camera: &mut Camera, terrain_height: f32) {
         self.mode = match self.mode {
             CameraMode::Freecam => {
                 enable_gravity_mode(camera, &mut self.physics, terrain_height);
@@ -71,7 +71,7 @@ impl PlayerController {
         };
     }
 
-    pub(crate) fn tick(
+    pub fn tick(
         &mut self,
         input: &FrameInput,
         camera: &mut Camera,

@@ -1,33 +1,31 @@
 use std::{error::Error, fs, mem::size_of, path::Path};
 
+use crate::{gpu_upload::create_buffer_with_data, worldmap::WorldmapManifest};
 use sdl3::gpu::{Buffer, BufferUsageFlags, CopyPass, Device};
-use tungsten::worldmap::WorldmapManifest;
-
-use crate::gpu_upload::create_buffer_with_data;
 
 const WATER_MESH_MAGIC: &[u8; 8] = b"TWMESH1\0";
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct WaterVertex {
-    pub(crate) position: [f32; 3],
-    pub(crate) normal: [f32; 3],
-    pub(crate) uv: [f32; 2],
+pub struct WaterVertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub uv: [f32; 2],
 }
 
-pub(crate) struct WaterMaps {
-    pub(crate) ocean: WaterMeshGpu,
-    pub(crate) tiles: Vec<WaterTileGpu>,
+pub struct WaterMaps {
+    pub ocean: WaterMeshGpu,
+    pub tiles: Vec<WaterTileGpu>,
 }
 
-pub(crate) struct WaterTileGpu {
-    pub(crate) mesh: WaterMeshGpu,
+pub struct WaterTileGpu {
+    pub mesh: WaterMeshGpu,
 }
 
-pub(crate) struct WaterMeshGpu {
-    pub(crate) vertex_buffer: Buffer,
-    pub(crate) index_buffer: Buffer,
-    pub(crate) index_count: u32,
+pub struct WaterMeshGpu {
+    pub vertex_buffer: Buffer,
+    pub index_buffer: Buffer,
+    pub index_count: u32,
 }
 
 #[derive(Debug)]
@@ -37,7 +35,7 @@ struct WaterMeshCpu {
 }
 
 impl WaterMaps {
-    pub(crate) fn load(
+    pub fn load(
         gpu: &Device,
         manifest: &WorldmapManifest,
         worldmap_dir: &Path,

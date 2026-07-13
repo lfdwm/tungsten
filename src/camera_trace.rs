@@ -63,12 +63,12 @@ impl CameraSample {
 }
 
 #[derive(Debug)]
-pub(crate) struct CameraTrace {
+pub struct CameraTrace {
     samples: Vec<CameraSample>,
 }
 
 impl CameraTrace {
-    pub(crate) fn load(path: &Path) -> Result<Self, Box<dyn Error>> {
+    pub fn load(path: &Path) -> Result<Self, Box<dyn Error>> {
         let contents = fs::read_to_string(path)
             .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
         Self::parse(&contents).map_err(|error| format!("{}: {error}", path.display()).into())
@@ -134,22 +134,22 @@ impl CameraTrace {
     }
 }
 
-pub(crate) struct CameraReplay {
+pub struct CameraReplay {
     trace: CameraTrace,
     frame: u64,
 }
 
 impl CameraReplay {
-    pub(crate) fn new(trace: CameraTrace) -> Self {
+    pub fn new(trace: CameraTrace) -> Self {
         let frame = trace.first_frame();
         Self { trace, frame }
     }
 
-    pub(crate) fn current_frame(&self) -> u64 {
+    pub fn current_frame(&self) -> u64 {
         self.frame
     }
 
-    pub(crate) fn apply_to_camera(&self, camera: &mut Camera) -> bool {
+    pub fn apply_to_camera(&self, camera: &mut Camera) -> bool {
         if let Some(sample) = self.trace.sample_at_frame(self.frame) {
             sample.apply_to_camera(camera);
             true
@@ -158,7 +158,7 @@ impl CameraReplay {
         }
     }
 
-    pub(crate) fn advance_after_submitted_frame(&mut self) -> bool {
+    pub fn advance_after_submitted_frame(&mut self) -> bool {
         if self.frame >= self.trace.last_frame() {
             false
         } else {
@@ -228,16 +228,16 @@ impl CameraRecorder {
     }
 }
 
-pub(crate) struct CameraRecordingController {
+pub struct CameraRecordingController {
     recorder: Option<CameraRecorder>,
 }
 
 impl CameraRecordingController {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self { recorder: None }
     }
 
-    pub(crate) fn toggle(&mut self, camera: &Camera) -> Result<(), Box<dyn Error>> {
+    pub fn toggle(&mut self, camera: &Camera) -> Result<(), Box<dyn Error>> {
         if let Some(active_recorder) = self.recorder.take() {
             print_camera_recording_summary(active_recorder.finish()?);
         } else {
@@ -247,10 +247,7 @@ impl CameraRecordingController {
         Ok(())
     }
 
-    pub(crate) fn update_after_submitted_frame(
-        &mut self,
-        camera: &Camera,
-    ) -> Result<(), Box<dyn Error>> {
+    pub fn update_after_submitted_frame(&mut self, camera: &Camera) -> Result<(), Box<dyn Error>> {
         if let Some(active_recorder) = self.recorder.as_mut() {
             active_recorder.update_after_submitted_frame(camera)?;
         }
@@ -258,7 +255,7 @@ impl CameraRecordingController {
         Ok(())
     }
 
-    pub(crate) fn finish_active(&mut self) -> Result<(), Box<dyn Error>> {
+    pub fn finish_active(&mut self) -> Result<(), Box<dyn Error>> {
         if let Some(active_recorder) = self.recorder.take() {
             print_camera_recording_summary(active_recorder.finish()?);
         }
@@ -267,7 +264,7 @@ impl CameraRecordingController {
     }
 }
 
-pub(crate) struct ReplayStats {
+pub struct ReplayStats {
     submitted_frame_count: u64,
     frame_count: u64,
     total: Duration,
@@ -325,7 +322,7 @@ impl ReplayStatsBucket {
 }
 
 impl ReplayStats {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             submitted_frame_count: 0,
             frame_count: 0,
@@ -336,7 +333,7 @@ impl ReplayStats {
         }
     }
 
-    pub(crate) fn record_frame(&mut self, replay_frame: u64, duration: Duration) {
+    pub fn record_frame(&mut self, replay_frame: u64, duration: Duration) {
         self.submitted_frame_count += 1;
         if self.submitted_frame_count > REPLAY_SUMMARY_WARMUP_FRAMES {
             self.frame_count += 1;
@@ -430,7 +427,7 @@ fn print_camera_recording_summary(summary: CameraRecordingSummary) {
     );
 }
 
-pub(crate) fn print_replay_stats(stats: &ReplayStats) {
+pub fn print_replay_stats(stats: &ReplayStats) {
     let elapsed_seconds = stats.total.as_secs_f64();
     let average_fps = if elapsed_seconds > 0.0 {
         stats.frame_count as f64 / elapsed_seconds
@@ -460,7 +457,7 @@ pub(crate) fn print_replay_stats(stats: &ReplayStats) {
     println!("frame_ms_max: {:.3}", frame_duration_ms(max_frame));
 }
 
-pub(crate) fn write_replay_stats_csv(stats: &ReplayStats) -> Result<PathBuf, Box<dyn Error>> {
+pub fn write_replay_stats_csv(stats: &ReplayStats) -> Result<PathBuf, Box<dyn Error>> {
     let (path, file) = create_replay_stats_file()?;
     let mut writer = BufWriter::new(file);
 

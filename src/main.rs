@@ -1,15 +1,3 @@
-mod camera;
-mod camera_trace;
-mod config;
-mod game_controls;
-mod gpu_upload;
-mod input;
-mod player;
-mod props;
-mod renderer;
-mod terrain;
-mod water;
-
 use std::{
     env,
     error::Error,
@@ -19,16 +7,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-use camera::{Camera, terrain_full_map_distance};
-use camera_trace::{
-    CameraReplay, CameraTrace, ReplayStats, print_replay_stats, write_replay_stats_csv,
-};
-use config::{AppConfig, CONFIG_PATH};
-use game_controls::GameControls;
-use input::InputState;
-use props::PropScene;
-use renderer::{OverlayStats, Renderer};
 use sdl3::gpu::{Device, ShaderFormat, SwapchainComposition};
+use tungsten::{
+    camera::{Camera, terrain_full_map_distance},
+    camera_trace::{
+        CameraReplay, CameraTrace, ReplayStats, print_replay_stats, write_replay_stats_csv,
+    },
+    config::{AppConfig, CONFIG_PATH},
+    game_controls::GameControls,
+    input::InputState,
+    props::PropScene,
+    renderer::{OverlayStats, Renderer},
+    terrain,
+};
 
 const WINDOW_WIDTH: u32 = 1280;
 const WINDOW_HEIGHT: u32 = 720;

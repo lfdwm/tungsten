@@ -8,51 +8,52 @@ use sdl3::gpu::{
     Device, Filter, Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode, Texture,
     TextureFormat, TextureUsage,
 };
-use tungsten::worldmap::{WorldmapManifest, manifest_dir};
 
 use crate::{
+    camera::CameraRay,
     config::AppConfig,
     gpu_upload::{
         create_texture_2d, create_texture_2d_with_pixels, upload_bytes_to_texture_region,
     },
     water::WaterMaps,
+    worldmap::{WorldmapManifest, manifest_dir},
 };
 
 const MAX_SHADER_TILE_SLOTS: usize = 25;
 const R16_BYTES_PER_PIXEL: usize = 2;
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 
-pub(crate) struct TerrainMaps {
-    pub(crate) color_near: Texture<'static>,
-    pub(crate) color_far: Texture<'static>,
-    pub(crate) height_near_atlas: Texture<'static>,
-    pub(crate) height_far: Texture<'static>,
-    pub(crate) color_sampler: Sampler,
-    pub(crate) height_sampler: Sampler,
-    pub(crate) terrain_size: [f32; 2],
-    pub(crate) source_size: [f32; 2],
-    pub(crate) height_near_atlas_size: [f32; 2],
-    pub(crate) height_far_size: [f32; 2],
-    pub(crate) color_far_size: [f32; 2],
-    pub(crate) tile_size: u32,
-    pub(crate) tile_padding: u32,
-    pub(crate) stored_tile_size: u32,
-    pub(crate) tile_cache_width: u32,
-    pub(crate) current_window_min: [u32; 2],
-    pub(crate) current_window_max: [u32; 2],
-    pub(crate) height_scale: f32,
-    pub(crate) manifest: WorldmapManifest,
-    pub(crate) worldmap_dir: PathBuf,
-    pub(crate) water: WaterMaps,
+pub struct TerrainMaps {
+    pub color_near: Texture<'static>,
+    pub color_far: Texture<'static>,
+    pub height_near_atlas: Texture<'static>,
+    pub height_far: Texture<'static>,
+    pub color_sampler: Sampler,
+    pub height_sampler: Sampler,
+    pub terrain_size: [f32; 2],
+    pub source_size: [f32; 2],
+    pub height_near_atlas_size: [f32; 2],
+    pub height_far_size: [f32; 2],
+    pub color_far_size: [f32; 2],
+    pub tile_size: u32,
+    pub tile_padding: u32,
+    pub stored_tile_size: u32,
+    pub tile_cache_width: u32,
+    pub current_window_min: [u32; 2],
+    pub current_window_max: [u32; 2],
+    pub height_scale: f32,
+    pub manifest: WorldmapManifest,
+    pub worldmap_dir: PathBuf,
+    pub water: WaterMaps,
     tile_cache: TerrainTileCache,
 }
 
 impl TerrainMaps {
-    pub(crate) fn collision_height(&self) -> &HeightField {
+    pub fn collision_height(&self) -> &HeightField {
         &self.tile_cache.collision_height
     }
 
-    pub(crate) fn update_tile_cache_for_position(
+    pub fn update_tile_cache_for_position(
         &mut self,
         gpu: &Device,
         world_x: f32,
@@ -216,14 +217,22 @@ fn slot_index_for_ring_tile(tile_x: u32, tile_y: u32, tile_cache_width: u32) -> 
     (slot_y * tile_cache_width + slot_x) as usize
 }
 
-pub(crate) struct HeightField {
+pub struct HeightField {
     slots: Vec<TerrainTileSlot>,
-    pub(crate) tile_size: u32,
-    pub(crate) tile_padding: u32,
-    pub(crate) stored_tile_size: u32,
-    pub(crate) source_size: [u32; 2],
-    pub(crate) terrain_size: [f32; 2],
-    pub(crate) height_scale: f32,
+    pub tile_size: u32,
+    pub tile_padding: u32,
+    pub stored_tile_size: u32,
+    pub source_size: [u32; 2],
+    pub terrain_size: [f32; 2],
+    pub height_scale: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerrainHit {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub height: f32,
+    pub distance: f32,
 }
 
 impl HeightField {
@@ -242,7 +251,7 @@ impl HeightField {
         })
     }
 
-    pub(crate) fn height_at(&self, world_x: f32, world_y: f32) -> f32 {
+    pub fn height_at(&self, world_x: f32, world_y: f32) -> f32 {
         let sample_x = (world_x / self.terrain_size[0] * self.source_size[0] as f32)
             .clamp(0.0, (self.source_size[0] - 1) as f32);
         let sample_y = (world_y / self.terrain_size[1] * self.source_size[1] as f32)
@@ -264,10 +273,53 @@ impl HeightField {
         h0 + (h1 - h0) * ty
     }
 
+    pub fn height_at_loaded(&self, world_x: f32, world_y: f32) -> Option<f32> {
+        let [sample_x, sample_y] = self.sample_coords(world_x, world_y)?;
+        let x0 = sample_x.floor() as u32;
+        let y0 = sample_y.floor() as u32;
+        let x1 = (x0 + 1).min(self.source_size[0] - 1);
+        let y1 = (y0 + 1).min(self.source_size[1] - 1);
+        let tx = sample_x - x0 as f32;
+        let ty = sample_y - y0 as f32;
+
+        let h00 = self.sample_height_loaded(x0, y0)?;
+        let h10 = self.sample_height_loaded(x1, y0)?;
+        let h01 = self.sample_height_loaded(x0, y1)?;
+        let h11 = self.sample_height_loaded(x1, y1)?;
+        let h0 = h00 + (h10 - h00) * tx;
+        let h1 = h01 + (h11 - h01) * tx;
+
+        Some(h0 + (h1 - h0) * ty)
+    }
+
+    fn sample_coords(&self, world_x: f32, world_y: f32) -> Option<[f32; 2]> {
+        if !world_x.is_finite()
+            || !world_y.is_finite()
+            || world_x < 0.0
+            || world_y < 0.0
+            || world_x > self.terrain_size[0]
+            || world_y > self.terrain_size[1]
+        {
+            return None;
+        }
+
+        Some([
+            (world_x / self.terrain_size[0] * self.source_size[0] as f32)
+                .clamp(0.0, (self.source_size[0] - 1) as f32),
+            (world_y / self.terrain_size[1] * self.source_size[1] as f32)
+                .clamp(0.0, (self.source_size[1] - 1) as f32),
+        ])
+    }
+
     fn sample_height(&self, x: u32, y: u32) -> f32 {
         self.sample_raw_height(x, y)
             .map(|height| height as f32 / u16::MAX as f32 * self.height_scale)
             .unwrap_or(0.0)
+    }
+
+    fn sample_height_loaded(&self, x: u32, y: u32) -> Option<f32> {
+        self.sample_raw_height(x, y)
+            .map(|height| height as f32 / u16::MAX as f32 * self.height_scale)
     }
 
     fn sample_raw_height(&self, x: u32, y: u32) -> Option<u16> {
@@ -334,6 +386,81 @@ impl HeightField {
     }
 }
 
+pub fn raycast_terrain(
+    height_field: &HeightField,
+    ray: CameraRay,
+    max_distance: f32,
+) -> Option<TerrainHit> {
+    let direction = ray.direction.normalize_or_zero();
+    if direction.length_squared() == 0.0 || max_distance <= 0.0 {
+        return None;
+    }
+
+    let sample_world_size = (height_field.terrain_size[0] / height_field.source_size[0] as f32)
+        .max(height_field.terrain_size[1] / height_field.source_size[1] as f32)
+        .max(0.25);
+    let max_steps = 8192.0;
+    let step = sample_world_size.max(max_distance / max_steps);
+    let mut previous = None::<(f32, f32)>;
+    let mut distance = 0.0;
+
+    while distance <= max_distance {
+        if let Some(delta) = terrain_ray_delta(height_field, ray.origin + direction * distance) {
+            if delta <= 0.0 {
+                let hit_distance = previous
+                    .map(|(previous_distance, _)| {
+                        refine_terrain_hit(
+                            height_field,
+                            ray.origin,
+                            direction,
+                            previous_distance,
+                            distance,
+                        )
+                    })
+                    .unwrap_or(distance);
+                let hit_pos = ray.origin + direction * hit_distance;
+                let height = height_field.height_at_loaded(hit_pos.x, hit_pos.z)?;
+                return Some(TerrainHit {
+                    world_x: hit_pos.x,
+                    world_y: hit_pos.z,
+                    height,
+                    distance: hit_distance,
+                });
+            }
+            previous = Some((distance, delta));
+        }
+
+        distance += step;
+    }
+
+    None
+}
+
+fn terrain_ray_delta(height_field: &HeightField, pos: glam::Vec3) -> Option<f32> {
+    height_field
+        .height_at_loaded(pos.x, pos.z)
+        .map(|height| pos.y - height)
+}
+
+fn refine_terrain_hit(
+    height_field: &HeightField,
+    origin: glam::Vec3,
+    direction: glam::Vec3,
+    mut low: f32,
+    mut high: f32,
+) -> f32 {
+    for _ in 0..12 {
+        let mid = (low + high) * 0.5;
+        match terrain_ray_delta(height_field, origin + direction * mid) {
+            Some(delta) if delta > 0.0 => low = mid,
+            Some(_) => high = mid,
+            None => break,
+        }
+    }
+
+    high
+}
+
 #[derive(Clone)]
 struct TerrainTileSlot {
     world_tile_x: i32,
@@ -361,10 +488,7 @@ struct TerrainTileCache {
     collision_height: HeightField,
 }
 
-pub(crate) fn load_terrain_maps(
-    gpu: &Device,
-    config: &AppConfig,
-) -> Result<TerrainMaps, Box<dyn Error>> {
+pub fn load_terrain_maps(gpu: &Device, config: &AppConfig) -> Result<TerrainMaps, Box<dyn Error>> {
     let manifest = WorldmapManifest::load(&config.worldmap)?;
     let worldmap_dir = manifest_dir(&config.worldmap)?;
     let stored_tile_size = manifest.stored_tile_size()?;
@@ -636,7 +760,7 @@ mod tests {
             color_far_height: 1,
             props_catalog_path: "props/catalog".to_owned(),
             props_tiles_path: "props/tiles".to_owned(),
-            water: tungsten::worldmap::WaterManifest {
+            water: crate::worldmap::WaterManifest {
                 source_width: 2,
                 source_height: 2,
                 tile_size_x: 2,

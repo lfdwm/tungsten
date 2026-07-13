@@ -1,0 +1,23 @@
+#version 450
+
+layout(location = 0) in vec2 in_pos;
+layout(location = 1) in vec2 in_uv;
+layout(location = 2) in vec4 in_color;
+
+layout(set = 1, binding = 0) uniform ImguiParams {
+    vec4 transform;
+};
+
+layout(location = 0) out vec2 frag_uv;
+layout(location = 1) out vec4 frag_color;
+
+void main() {
+    frag_uv = in_uv;
+    frag_color = in_color;
+    gl_Position = vec4(
+        in_pos.x * transform.x + transform.z,
+        -(in_pos.y * transform.y + transform.w),
+        0.0,
+        1.0
+    );
+}

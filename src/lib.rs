@@ -1,1 +1,13 @@
+pub mod camera;
+pub mod camera_trace;
+pub mod config;
+pub mod game_controls;
+pub mod gpu_upload;
+pub mod imgui_sdl_gpu;
+pub mod input;
+pub mod player;
+pub mod props;
+pub mod renderer;
+pub mod terrain;
+pub mod water;
 pub mod worldmap;

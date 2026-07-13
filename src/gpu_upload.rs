@@ -6,7 +6,7 @@ use sdl3::gpu::{
     TransferBufferLocation, TransferBufferUsage,
 };
 
-pub(crate) fn create_buffer_with_data<T: Copy>(
+pub fn create_buffer_with_data<T: Copy>(
     gpu: &Device,
     copy_pass: &CopyPass,
     usage: BufferUsageFlags,
@@ -47,7 +47,7 @@ pub(crate) fn create_buffer_with_data<T: Copy>(
     Ok(buffer)
 }
 
-pub(crate) fn create_texture_2d(
+pub fn create_texture_2d(
     gpu: &Device,
     width: u32,
     height: u32,
@@ -66,7 +66,7 @@ pub(crate) fn create_texture_2d(
     )?)
 }
 
-pub(crate) fn create_texture_2d_with_pixels(
+pub fn create_texture_2d_with_pixels(
     gpu: &Device,
     copy_pass: &CopyPass,
     width: u32,
@@ -84,7 +84,7 @@ pub(crate) fn create_texture_2d_with_pixels(
     Ok(texture)
 }
 
-pub(crate) fn upload_bytes_to_texture_region(
+pub fn upload_bytes_to_texture_region(
     gpu: &Device,
     copy_pass: &CopyPass,
     texture: &Texture,

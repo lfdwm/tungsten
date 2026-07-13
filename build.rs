@@ -14,6 +14,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=shaders/water.vert");
     println!("cargo:rerun-if-changed=shaders/water.frag");
     println!("cargo:rerun-if-changed=shaders/upscale.frag");
+    println!("cargo:rerun-if-changed=shaders/imgui.vert");
+    println!("cargo:rerun-if-changed=shaders/imgui.frag");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     compile_shader(
@@ -29,6 +31,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     compile_shader("shaders/water.vert", out_dir.join("water.vert.spv"))?;
     compile_shader("shaders/water.frag", out_dir.join("water.frag.spv"))?;
     compile_shader("shaders/upscale.frag", out_dir.join("upscale.frag.spv"))?;
+    compile_shader("shaders/imgui.vert", out_dir.join("imgui.vert.spv"))?;
+    compile_shader("shaders/imgui.frag", out_dir.join("imgui.frag.spv"))?;
 
     Ok(())
 }

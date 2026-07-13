@@ -12,33 +12,33 @@ use sdl3::gpu::{
     Buffer, BufferUsageFlags, CopyPass, Device, Filter, Sampler, SamplerAddressMode,
     SamplerCreateInfo, SamplerMipmapMode, Texture, TextureFormat, TextureUsage,
 };
-use serde::Deserialize;
-use tungsten::worldmap::WorldmapManifest;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     gpu_upload::{create_buffer_with_data, create_texture_2d_with_pixels},
     terrain::{HeightField, TerrainMaps},
+    worldmap::WorldmapManifest,
 };
 
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PropVertex {
-    pub(crate) position: [f32; 3],
-    pub(crate) normal: [f32; 3],
-    pub(crate) texcoord: [f32; 2],
-    pub(crate) tangent: [f32; 4],
+pub struct PropVertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub texcoord: [f32; 2],
+    pub tangent: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct PropInstanceGpu {
-    pub(crate) model: [f32; 4],
-    pub(crate) rotation: [f32; 4],
+pub struct PropInstanceGpu {
+    pub model: [f32; 4],
+    pub rotation: [f32; 4],
 }
 
-pub(crate) struct PropScene {
+pub struct PropScene {
     catalog: PropCatalog,
     worldmap_dir: PathBuf,
     active_window_min: [u32; 2],
@@ -49,10 +49,10 @@ pub(crate) struct PropScene {
     draw_groups: Vec<PropDrawGroup>,
 }
 
-pub(crate) struct PropDrawGroup {
-    pub(crate) model_path: PathBuf,
-    pub(crate) instance_buffer: Buffer,
-    pub(crate) instance_count: u32,
+pub struct PropDrawGroup {
+    pub model_path: PathBuf,
+    pub instance_buffer: Buffer,
+    pub instance_count: u32,
 }
 
 enum PropModelState {
@@ -108,15 +108,15 @@ impl PropModelLoader {
 }
 
 #[derive(Clone, Debug)]
-struct PropCatalog {
+pub struct PropCatalog {
     definitions: HashMap<String, PropDefinition>,
 }
 
 #[derive(Clone, Debug)]
-struct PropDefinition {
-    id: String,
-    model_path: PathBuf,
-    metadata: toml::Table,
+pub struct PropDefinition {
+    pub id: String,
+    pub model_path: PathBuf,
+    pub metadata: toml::Table,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,32 +128,36 @@ struct PropDefinitionToml {
     metadata: toml::Table,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PropTileToml {
-    #[serde(default)]
-    instance: Vec<PropInstanceToml>,
+pub struct PropTileToml {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instance: Vec<PropInstanceToml>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+pub type PropTile = PropTileToml;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PropInstanceToml {
-    prop: String,
-    source_x: f32,
-    source_y: f32,
-    height_mode: PropHeightMode,
-    height: f32,
-    height_offset: f32,
-    pitch: f32,
-    yaw: f32,
-    roll: f32,
-    scale: f32,
-    #[serde(default)]
-    metadata: toml::Table,
+pub struct PropInstanceToml {
+    pub prop: String,
+    pub source_x: f32,
+    pub source_y: f32,
+    pub height_mode: PropHeightMode,
+    pub height: f32,
+    pub height_offset: f32,
+    pub pitch: f32,
+    pub yaw: f32,
+    pub roll: f32,
+    pub scale: f32,
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    pub metadata: toml::Table,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-enum PropHeightMode {
+pub type PropInstance = PropInstanceToml;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum PropHeightMode {
     #[serde(rename = "terrain")]
     Terrain,
     #[serde(rename = "absolute")]
@@ -189,28 +193,28 @@ struct PropTextureCpu {
     pixels: Vec<u8>,
 }
 
-pub(crate) struct PropModelGpu {
-    pub(crate) meshes: Vec<PropMeshGpu>,
-    pub(crate) materials: Vec<PropMaterialGpu>,
+pub struct PropModelGpu {
+    pub meshes: Vec<PropMeshGpu>,
+    pub materials: Vec<PropMaterialGpu>,
 }
 
-pub(crate) struct PropMeshGpu {
-    pub(crate) vertex_buffer: Buffer,
-    pub(crate) index_buffer: Buffer,
-    pub(crate) index_count: u32,
-    pub(crate) material_index: usize,
+pub struct PropMeshGpu {
+    pub vertex_buffer: Buffer,
+    pub index_buffer: Buffer,
+    pub index_count: u32,
+    pub material_index: usize,
 }
 
-pub(crate) struct PropMaterialGpu {
-    pub(crate) base_color_texture: Texture<'static>,
-    pub(crate) normal_texture: Texture<'static>,
-    pub(crate) base_color: [f32; 4],
-    pub(crate) specular: [f32; 4],
-    pub(crate) flags: [f32; 4],
+pub struct PropMaterialGpu {
+    pub base_color_texture: Texture<'static>,
+    pub normal_texture: Texture<'static>,
+    pub base_color: [f32; 4],
+    pub specular: [f32; 4],
+    pub flags: [f32; 4],
 }
 
 impl PropScene {
-    pub(crate) fn load(gpu: &Device, terrain: &TerrainMaps) -> Result<Self, Box<dyn Error>> {
+    pub fn load(gpu: &Device, terrain: &TerrainMaps) -> Result<Self, Box<dyn Error>> {
         let catalog = PropCatalog::load(
             &terrain.manifest.props_catalog_dir(&terrain.worldmap_dir),
             &terrain.worldmap_dir,
@@ -231,13 +235,12 @@ impl PropScene {
         Ok(scene)
     }
 
-    pub(crate) fn update_for_terrain(
+    pub fn update_for_terrain(
         &mut self,
         gpu: &Device,
         terrain: &TerrainMaps,
     ) -> Result<(), Box<dyn Error>> {
-        self.drain_completed_model_loads();
-        self.upload_one_pending_model(gpu);
+        self.update_model_loads(gpu);
 
         if self.active_window_min == terrain.current_window_min
             && self.active_window_max == terrain.current_window_max
@@ -257,11 +260,40 @@ impl PropScene {
         Ok(())
     }
 
-    pub(crate) fn draw_groups(&self) -> &[PropDrawGroup] {
+    pub fn refresh_for_editor_tiles(
+        &mut self,
+        gpu: &Device,
+        terrain: &TerrainMaps,
+        edited_tiles: &BTreeMap<[u32; 2], PropTileToml>,
+    ) -> Result<(), Box<dyn Error>> {
+        self.update_model_loads(gpu);
+
+        let grouped_instances = self.active_instances_with_overrides(terrain, edited_tiles)?;
+        for model_path in grouped_instances.keys() {
+            self.request_model_if_needed(model_path)?;
+        }
+
+        self.draw_groups = upload_instance_groups(gpu, grouped_instances)?;
+        self.active_window_min = terrain.current_window_min;
+        self.active_window_max = terrain.current_window_max;
+
+        Ok(())
+    }
+
+    pub fn update_model_loads(&mut self, gpu: &Device) {
+        self.drain_completed_model_loads();
+        self.upload_one_pending_model(gpu);
+    }
+
+    pub fn catalog(&self) -> &PropCatalog {
+        &self.catalog
+    }
+
+    pub fn draw_groups(&self) -> &[PropDrawGroup] {
         &self.draw_groups
     }
 
-    pub(crate) fn model(&self, path: &Path) -> Option<&PropModelGpu> {
+    pub fn model(&self, path: &Path) -> Option<&PropModelGpu> {
         match self.models.get(path) {
             Some(PropModelState::Ready(model)) => Some(model),
             Some(PropModelState::Loading | PropModelState::Failed) | None => None,
@@ -293,6 +325,33 @@ impl PropScene {
         for tile_y in terrain.current_window_min[1]..=terrain.current_window_max[1] {
             for tile_x in terrain.current_window_min[0]..=terrain.current_window_max[0] {
                 self.load_tile_instances(terrain, tile_x, tile_y, &mut grouped_instances)?;
+            }
+        }
+
+        Ok(grouped_instances)
+    }
+
+    fn active_instances_with_overrides(
+        &self,
+        terrain: &TerrainMaps,
+        edited_tiles: &BTreeMap<[u32; 2], PropTileToml>,
+    ) -> Result<BTreeMap<PathBuf, Vec<PropInstanceGpu>>, Box<dyn Error>> {
+        let mut grouped_instances = BTreeMap::<PathBuf, Vec<PropInstanceGpu>>::new();
+        for tile_y in terrain.current_window_min[1]..=terrain.current_window_max[1] {
+            for tile_x in terrain.current_window_min[0]..=terrain.current_window_max[0] {
+                if let Some(tile) = edited_tiles.get(&[tile_x, tile_y]) {
+                    let context = format!("edited prop tile {tile_x},{tile_y}");
+                    self.push_tile_instances(
+                        terrain,
+                        tile_x,
+                        tile_y,
+                        tile,
+                        &context,
+                        &mut grouped_instances,
+                    )?;
+                } else {
+                    self.load_tile_instances(terrain, tile_x, tile_y, &mut grouped_instances)?;
+                }
             }
         }
 
@@ -401,8 +460,29 @@ impl PropScene {
         let tile: PropTileToml =
             toml::from_str(&contents).map_err(|error| format!("{}: {error}", path.display()))?;
 
+        self.push_tile_instances(
+            terrain,
+            tile_x,
+            tile_y,
+            &tile,
+            &path.display().to_string(),
+            grouped_instances,
+        )?;
+
+        Ok(())
+    }
+
+    fn push_tile_instances(
+        &self,
+        terrain: &TerrainMaps,
+        tile_x: u32,
+        tile_y: u32,
+        tile: &PropTileToml,
+        context: &str,
+        grouped_instances: &mut BTreeMap<PathBuf, Vec<PropInstanceGpu>>,
+    ) -> Result<(), Box<dyn Error>> {
         for (index, instance) in tile.instance.iter().enumerate() {
-            let context = format!("{} instance {index}", path.display());
+            let context = format!("{context} instance {index}");
             validate_instance(instance, &terrain.manifest, tile_x, tile_y, &context)?;
             let definition = self.catalog.definition(&instance.prop).ok_or_else(|| {
                 format!(
@@ -424,7 +504,7 @@ impl PropScene {
 }
 
 impl PropCatalog {
-    fn load(catalog_dir: &Path, worldmap_dir: &Path) -> Result<Self, Box<dyn Error>> {
+    pub fn load(catalog_dir: &Path, worldmap_dir: &Path) -> Result<Self, Box<dyn Error>> {
         let entries = fs::read_dir(catalog_dir).map_err(|error| {
             format!(
                 "failed to read prop catalog directory {}: {error}",
@@ -468,8 +548,14 @@ impl PropCatalog {
         Ok(Self { definitions })
     }
 
-    fn definition(&self, id: &str) -> Option<&PropDefinition> {
+    pub fn definition(&self, id: &str) -> Option<&PropDefinition> {
         self.definitions.get(id)
+    }
+
+    pub fn sorted_ids(&self) -> Vec<String> {
+        let mut ids = self.definitions.keys().cloned().collect::<Vec<_>>();
+        ids.sort();
+        ids
     }
 }
 
@@ -491,6 +577,55 @@ impl PropDefinition {
             model_path: resolve_worldmap_path(worldmap_dir, &toml.model_path),
             metadata: toml.metadata,
         })
+    }
+}
+
+impl PropTileToml {
+    pub fn load_or_empty(path: &Path) -> Result<Self, Box<dyn Error>> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+
+        let contents = fs::read_to_string(path)
+            .map_err(|error| format!("failed to read prop tile {}: {error}", path.display()))?;
+        toml::from_str(&contents).map_err(|error| format!("{}: {error}", path.display()).into())
+    }
+
+    pub fn save_to_path(&self, path: &Path) -> Result<(), Box<dyn Error>> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create prop tile directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        let contents = toml::to_string_pretty(self).map_err(|error| {
+            format!("failed to serialize prop tile {}: {error}", path.display())
+        })?;
+        fs::write(path, contents)
+            .map_err(|error| format!("failed to write prop tile {}: {error}", path.display()))?;
+
+        Ok(())
+    }
+}
+
+impl PropInstanceToml {
+    pub fn terrain(prop: String, source_x: f32, source_y: f32) -> Self {
+        Self {
+            prop,
+            source_x,
+            source_y,
+            height_mode: PropHeightMode::Terrain,
+            height: 0.0,
+            height_offset: 0.0,
+            pitch: 0.0,
+            yaw: 0.0,
+            roll: 0.0,
+            scale: 1.0,
+            metadata: toml::Table::new(),
+        }
     }
 }
 
@@ -664,7 +799,7 @@ impl PropMaterialGpu {
     }
 }
 
-pub(crate) fn create_prop_sampler(gpu: &Device) -> Result<Sampler, Box<dyn Error>> {
+pub fn create_prop_sampler(gpu: &Device) -> Result<Sampler, Box<dyn Error>> {
     Ok(gpu.create_sampler(
         SamplerCreateInfo::new()
             .with_min_filter(Filter::Nearest)
@@ -674,6 +809,28 @@ pub(crate) fn create_prop_sampler(gpu: &Device) -> Result<Sampler, Box<dyn Error
             .with_address_mode_v(SamplerAddressMode::Repeat)
             .with_address_mode_w(SamplerAddressMode::ClampToEdge),
     )?)
+}
+
+pub fn prop_tile_coords_for_source(
+    manifest: &WorldmapManifest,
+    source_x: f32,
+    source_y: f32,
+) -> [u32; 2] {
+    [
+        ((source_x.floor().max(0.0) as u32) / manifest.tile_size).min(manifest.tile_count_x - 1),
+        ((source_y.floor().max(0.0) as u32) / manifest.tile_size).min(manifest.tile_count_y - 1),
+    ]
+}
+
+pub fn source_position_from_world(
+    manifest: &WorldmapManifest,
+    world_x: f32,
+    world_y: f32,
+) -> [f32; 2] {
+    [
+        (world_x / manifest.horizontal_scale).clamp(0.0, manifest.source_width as f32 - 0.001),
+        (world_y / manifest.horizontal_scale).clamp(0.0, manifest.source_height as f32 - 0.001),
+    ]
 }
 
 fn upload_instance_groups(

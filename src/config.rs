@@ -3,7 +3,7 @@ use std::{error::Error, fs, io, path::PathBuf};
 use sdl3::gpu::PresentMode;
 use serde::Deserialize;
 
-pub(crate) const CONFIG_PATH: &str = "config.toml";
+pub const CONFIG_PATH: &str = "config.toml";
 const DEFAULT_WORLDMAP_PATH: &str = "assets/worldmaps/continent/manifest.toml";
 const DEFAULT_START_X: f32 = 250.0;
 const DEFAULT_START_Y: f32 = 330.0;
@@ -26,27 +26,27 @@ const DEFAULT_RENDER_DEBUG_VISUALS: bool = false;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct AppConfig {
-    pub(crate) worldmap: PathBuf,
-    pub(crate) tile_cache_radius: u32,
-    pub(crate) ray_iteration_count: u32,
-    pub(crate) performance_render_scale: f32,
-    pub(crate) present_mode: AppPresentMode,
-    pub(crate) max_framerate: f32,
-    pub(crate) render_debug_visuals: bool,
-    pub(crate) near_dda_distance: f32,
-    pub(crate) near_dda_max_steps: u32,
-    pub(crate) start_x: f32,
-    pub(crate) start_y: f32,
-    pub(crate) start_height: f32,
-    pub(crate) normal_detail_blend_start: f32,
-    pub(crate) normal_detail_blend_end: f32,
-    pub(crate) height_lod_blend_start: f32,
-    pub(crate) height_lod_blend_end: f32,
+pub struct AppConfig {
+    pub worldmap: PathBuf,
+    pub tile_cache_radius: u32,
+    pub ray_iteration_count: u32,
+    pub performance_render_scale: f32,
+    pub present_mode: AppPresentMode,
+    pub max_framerate: f32,
+    pub render_debug_visuals: bool,
+    pub near_dda_distance: f32,
+    pub near_dda_max_steps: u32,
+    pub start_x: f32,
+    pub start_y: f32,
+    pub start_height: f32,
+    pub normal_detail_blend_start: f32,
+    pub normal_detail_blend_end: f32,
+    pub height_lod_blend_start: f32,
+    pub height_lod_blend_end: f32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-pub(crate) enum AppPresentMode {
+pub enum AppPresentMode {
     #[serde(rename = "vsync", alias = "v-sync")]
     Vsync,
     #[serde(rename = "immediate")]
@@ -56,7 +56,7 @@ pub(crate) enum AppPresentMode {
 }
 
 impl AppPresentMode {
-    pub(crate) fn to_sdl(self) -> PresentMode {
+    pub fn to_sdl(self) -> PresentMode {
         match self {
             Self::Vsync => PresentMode::Vsync,
             Self::Immediate => PresentMode::Immediate,
@@ -64,7 +64,7 @@ impl AppPresentMode {
         }
     }
 
-    pub(crate) fn as_config_value(self) -> &'static str {
+    pub fn as_config_value(self) -> &'static str {
         match self {
             Self::Vsync => "vsync",
             Self::Immediate => "immediate",
@@ -97,7 +97,7 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    pub(crate) fn load(path: &str) -> Result<Self, Box<dyn Error>> {
+    pub fn load(path: &str) -> Result<Self, Box<dyn Error>> {
         match fs::read_to_string(path) {
             Ok(contents) => {
                 Self::parse(&contents).map_err(|error| format!("{path}: {error}").into())

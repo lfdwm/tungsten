@@ -7,7 +7,7 @@ use crate::{
     player::PlayerController, renderer::DebugVisualMode, terrain::TerrainMaps,
 };
 
-pub(crate) struct GameControls {
+pub struct GameControls {
     player: PlayerController,
     camera_recording: CameraRecordingController,
     debug_visual_mode: DebugVisualMode,
@@ -15,7 +15,7 @@ pub(crate) struct GameControls {
 }
 
 impl GameControls {
-    pub(crate) fn new(render_debug_visuals: bool) -> Self {
+    pub fn new(render_debug_visuals: bool) -> Self {
         Self {
             player: PlayerController::new(),
             camera_recording: CameraRecordingController::new(),
@@ -24,7 +24,7 @@ impl GameControls {
         }
     }
 
-    pub(crate) fn update(
+    pub fn update(
         &mut self,
         input: &FrameInput,
         gpu: &Device,
@@ -59,18 +59,15 @@ impl GameControls {
         Ok(())
     }
 
-    pub(crate) fn debug_visual_mode(&self) -> DebugVisualMode {
+    pub fn debug_visual_mode(&self) -> DebugVisualMode {
         self.debug_visual_mode
     }
 
-    pub(crate) fn update_after_submitted_frame(
-        &mut self,
-        camera: &Camera,
-    ) -> Result<(), Box<dyn Error>> {
+    pub fn update_after_submitted_frame(&mut self, camera: &Camera) -> Result<(), Box<dyn Error>> {
         self.camera_recording.update_after_submitted_frame(camera)
     }
 
-    pub(crate) fn finish_recording(&mut self) -> Result<(), Box<dyn Error>> {
+    pub fn finish_recording(&mut self) -> Result<(), Box<dyn Error>> {
         self.camera_recording.finish_active()
     }
 
